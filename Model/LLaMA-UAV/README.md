@@ -21,7 +21,7 @@ pip install -e .
 2. Install additional packages for training cases
 ```bash
 pip install ninja
-pip install flash-attn=2.5.9.post1 --no-build-isolation
+pip install flash-attn==2.5.9.post1 --no-build-isolation
 ```
 
 ## Preparation
