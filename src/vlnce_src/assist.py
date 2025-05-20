@@ -60,7 +60,7 @@ class Assist:
                 diffs.append(diff)
             distance = np.array(prev_episode[-1]["sensors"]["state"]["position"]) - np.array(current_episode[-1]["sensors"]["state"]["position"])
             distance = np.linalg.norm(np.array(distance))
-            if np.all(diff < 3):
+            if np.all(diffs < 3):
                 collision_type = 'tiny diff'
             elif close_collision:
                 collision_type = 'close'
