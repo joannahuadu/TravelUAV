@@ -19,7 +19,7 @@
 - [Citation](#paper)
 
 ## News
-
+- **2025-05-22:** We released UAV-Flow, the first real-world benchmark for language-conditioned UAV imitation learning (project page: https://prince687028.github.io/UAV-Flow)
 - **2025-01-25:** Paper, project page, code, data, envs and models are all released.
 
 # Introduction
