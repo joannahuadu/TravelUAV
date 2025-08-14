@@ -1,14 +1,14 @@
 #!/bin/bash
 # change the root_dir and dataset_path to your own path
 
-root_dir=/home/airport/airdrone/TravelUAV/TravelUAV # TravelUAV directory
+root_dir=/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
 deepspeed \
     --include localhost:0 \
     --master_port 29101 \
     $model_dir/llamavid/train/train_uav/train_uav_notice.py \
     --data_path $root_dir/data/uav_dataset/trainset.json \
-    --dataset_path /mnt/data6/airdrone/dataset/replay_data_log0.1_image0.5/\
+    --dataset_path /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV \
     --output_dir $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32 \
     --deepspeed $model_dir/scripts/zero2.json \
     --model_name_or_path $model_dir/model_zoo/vicuna-7b-v1.5/ \
@@ -28,7 +28,7 @@ deepspeed \
     --pretrain_qformer $model_dir/model_zoo/LAVIS/instruct_blip_vicuna7b_trimmed.pth \
     --compress_type "mean" \
     --bf16 True \
-    --num_train_epochs 2 \
+    --num_train_epochs 10 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 2 \
@@ -44,7 +44,7 @@ deepspeed \
     --tf32 True \
     --model_max_length 2048 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers 8 \
     --lazy_preprocess True \
     --report_to wandb \
     --lora_enable True \
