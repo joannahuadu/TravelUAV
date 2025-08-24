@@ -3,7 +3,7 @@
 
 root_dir=/workspace/wmq/TravelUAV # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
-CUDA_VISIBLE_DEVICES=0 python -m llamavid.train.train_traj_model \
+CUDA_VISIBLE_DEVICES=4 python -m llamavid.train.train_traj_model \
     --model_name_or_path $model_dir/model_zoo/LAVIS/eva_vit_g.pth \
     --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \
     --image_processor $model_dir/llamavid/processor/clip-patch14-224 \
@@ -14,5 +14,5 @@ CUDA_VISIBLE_DEVICES=0 python -m llamavid.train.train_traj_model \
     --learning_rate 5e-4 \
     --drop_rate 0.1 \
     --bs 128 \
-    --epoch 6 \
+    --epoch 10 \
     --bf16 True

@@ -34,6 +34,7 @@ import torch
 
 import transformers
 
+import llamavid.qwen2
 from llamavid.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, WAYPOINT_INPUT_TOKEN, WAYPOINT_LABEL_TOKEN, DEFAULT_WP_TOKEN, DEFAULT_HISTORY_TOKEN, WP_TOKEN_INDEX, HIS_TOKEN_INDEX
 from torch.utils.data import Dataset
 from llamavid.train.llava_trainer import LLaVATrainer
@@ -1087,7 +1088,15 @@ def train():
             scaling_factor = float(math.ceil(training_args.model_max_length / orig_ctx_len))
             config.rope_scaling = {"type": "linear", "factor": scaling_factor}
 
-    model = LlavaLlamaAttForCausalLM.from_pretrained(
+    if "llama" in model_args.model_name_or_path or 'vicuna' in model_args.model_name_or_path:
+        ModelClass = LlavaLlamaAttForCausalLM
+    elif "Qwen" in model_args.model_name_or_path:
+        ModelClass = LlavaQwenAttForCausalLM
+        config._attn_implementation = 'eager'
+    else:
+        raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
+
+    model = ModelClass.from_pretrained(
         model_args.model_name_or_path,
         use_angle_and_norm_loss=model_args.use_angle_and_norm_loss,
         config=config,
@@ -1157,7 +1166,10 @@ def train():
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
     else:
-        tokenizer.pad_token = tokenizer.unk_token
+        if tokenizer.unk_token:
+            tokenizer.pad_token = tokenizer.unk_token
+        else: #TODO: NOT SURE!
+            tokenizer.add_special_tokens({"unk_token": "<unk>"})
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
@@ -1199,9 +1211,9 @@ def train():
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
         
     smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<his>'], tokenizer=tokenizer, model=model)
-      
-    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>')[1], '<his>': tokenizer.encode('<his>')[1],
-                                ',': tokenizer.encode(',')[1], ';': tokenizer.encode(';')[1]})
+    
+    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<his>': tokenizer.encode('<his>', add_special_tokens=False)[0],
+                                ',': tokenizer.encode(',', add_special_tokens=False)[0], ';': tokenizer.encode(';', add_special_tokens=False)[0]})
 
     # all the attention modules require grad
     model.get_model().initialize_attention_modules(model_args)

@@ -27,10 +27,15 @@ def load_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
     tokenizer, model, image_processor, _ = load_pretrained_model(model_path, args.model_base, model_name)
-    
+    if tokenizer.unk_token:
+        tokenizer.pad_token = tokenizer.unk_token
+    else: #TODO: NOT SURE!
+        tokenizer.add_special_tokens({"unk_token": "<unk>"})
     smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<his>'], tokenizer=tokenizer, model=model)
-    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>')[1], '<his>': tokenizer.encode('<his>')[1],
-                                ',': tokenizer.encode(',')[1], ';': tokenizer.encode(';')[1]})
+    # model.get_special_token_id({'<wp>': tokenizer.encode('<wp>')[1], '<his>': tokenizer.encode('<his>')[1],
+                                # ',': tokenizer.encode(',')[1], ';': tokenizer.encode(';')[1]})
+    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<his>': tokenizer.encode('<his>', add_special_tokens=False)[0],
+                                ',': tokenizer.encode(',', add_special_tokens=False)[0], ';': tokenizer.encode(';', add_special_tokens=False)[0]})
     lora_enable = True
     if lora_enable:
         print(f"Loading LoRA weights from {model_path}")

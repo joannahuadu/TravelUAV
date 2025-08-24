@@ -48,7 +48,14 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print('Loading LLaVA from base model...')
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
             cfg_pretrained = AutoConfig.from_pretrained(model_path)
-            model = LlavaLlamaAttForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
+            if "llama" in model_base or 'vicuna' in model_base:
+                ModelClass = LlavaLlamaAttForCausalLM
+            elif "Qwen" in model_base:
+                ModelClass = LlavaQwenAttForCausalLM
+                cfg_pretrained._attn_implementation = 'eager'
+            else:
+                raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
+            model = ModelClass.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
             model.to(torch.bfloat16)
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
             model.load_state_dict(mm_projector_weights, strict=False)

@@ -36,3 +36,12 @@ src/model_wrapper/utils/__pycache__
 =*
 *.txt
 *.toml
+__pycache__/
+*/__pycache__/
+**/__pycache__/__
+*.pyc
+*.txt
+*.png
+*.csv
+*.sh
+traj*

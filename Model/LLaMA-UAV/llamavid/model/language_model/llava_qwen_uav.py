@@ -19,21 +19,22 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
-from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig
+from transformers import AutoConfig, AutoModelForCausalLM
+from llamavid.qwen2 import Qwen2Config, Qwen2Model
 
 from llamavid.model.llamavid_arch import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM
-from llamavid.model.language_model.llama_uav import LlamaUAVModel, LlamaUAVForCausalLM, CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
+from llamavid.model.language_model.qwen_uav import QwenUAVForCausalLM, CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
 
 from llamavid.constants import WAYPOINT_LABEL_TOKEN
 
-class LlavaConfig(LlamaConfig):
-    model_type = "llava_llama_uav"
+class LlavaQwenConfig(Qwen2Config):
+    model_type = "llava_qwen_uav"
 
-class LlavaAttLlamaModel(LLaMAVIDMetaModel, LlamaUAVModel):
-    config_class = LlavaConfig
+class LlavaAttQwenModel(LLaMAVIDMetaModel, Qwen2Model):
+    config_class = LlavaQwenConfig
 
-    def __init__(self, config: LlamaConfig):
-        super(LlavaAttLlamaModel, self).__init__(config)
+    def __init__(self, config: Qwen2Config):
+        super(LlavaAttQwenModel, self).__init__(config)
  
         
 class CosineDirectionLoss(nn.Module):
@@ -46,11 +47,11 @@ class CosineDirectionLoss(nn.Module):
         return loss.mean()
     
 
-class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
-    config_class = LlavaConfig
+class LlavaQwenAttForCausalLM(QwenUAVForCausalLM, LLaMAVIDMetaForCausalLM):
+    config_class = LlavaQwenConfig
     def __init__(self, config, **model_args):
-        super(LlamaUAVForCausalLM, self).__init__(config)
-        self.model = LlavaAttLlamaModel(config)
+        super(QwenUAVForCausalLM, self).__init__(config)
+        self.model = LlavaAttQwenModel(config)
         self.use_angle_and_norm_loss = model_args.get('use_angle_and_norm_loss', True)
         # self.
         # TODO: set LLaMAVIDMetaForCausalLM config
@@ -65,9 +66,9 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         self.waypoints_output = nn.Linear(64, 4)
         
         self.history_preprocessor = nn.Sequential(
-            nn.Linear(3, 4096 // 2),
+            nn.Linear(3, config.hidden_size // 2),
             nn.ReLU(),
-            nn.Linear(4096 // 2, 4096),
+            nn.Linear(config.hidden_size // 2, config.hidden_size),
         )
         
         self.waypoints_loss_func = torch.nn.L1Loss()
@@ -207,5 +208,5 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         )
         return model_inputs
 
-AutoConfig.register("llava_llama_uav", LlavaConfig, exist_ok=True)
-AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaAttForCausalLM)
+AutoConfig.register("llava_qwen_uav", LlavaQwenConfig)
+AutoModelForCausalLM.register(LlavaQwenConfig, LlavaQwenAttForCausalLM)
