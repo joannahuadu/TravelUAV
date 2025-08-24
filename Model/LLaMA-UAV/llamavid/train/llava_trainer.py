@@ -19,7 +19,6 @@ from transformers.trainer_pt_utils import (
     get_parameter_names,
 )
 from transformers.trainer_utils import (
-    ShardedDDPOption,
     has_length
 )
 from transformers.utils import (
@@ -50,7 +49,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampl
 
 from transformers import __version__
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
-from transformers.deepspeed import deepspeed_init, deepspeed_load_checkpoint
+from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_callback import (
     TrainerState,
@@ -62,7 +61,6 @@ from transformers.trainer_pt_utils import (
 )
 from transformers.trainer_utils import (
     HPSearchBackend,
-    ShardedDDPOption,
     TrainOutput,
     has_length,
     speed_metrics,
@@ -70,12 +68,25 @@ from transformers.trainer_utils import (
 from transformers.training_args import ParallelMode
 from transformers.utils import (
     is_sagemaker_mp_enabled,
-    is_torch_tpu_available,
     is_accelerate_available,
     is_apex_available,
     logging,
 )
-
+def is_torch_tpu_available(check_device: bool = True) -> bool:
+    """
+    自定义 TPU/XLA 检测。
+    check_device=True 时，尝试初始化设备。
+    """
+    try:
+        import torch_xla.core.xla_model as xm
+        if check_device:
+            try:
+                _ = xm.xla_device()
+            except Exception:
+                return False
+        return True
+    except Exception:
+        return False
 from typing import List, Optional, Union, Dict, Any
 
 logger = logging.get_logger(__name__)
@@ -244,6 +255,7 @@ class LLaVATrainer(Trainer):
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
+        
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
 
         len_dataloader = None
@@ -295,10 +307,15 @@ class LLaVATrainer(Trainer):
                 )
             else:
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
-
+        
+        if not hasattr(self, "sharded_ddp"):
+            self.sharded_ddp = None
+        if not hasattr(self, "fsdp"):
+            self.fsdp = getattr(self.args, "fsdp", None)
+        
         delay_optimizer_creation = (
             self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
+            and self.sharded_ddp != "simple"
             or is_sagemaker_mp_enabled()
             or self.fsdp is not None
         )
@@ -765,7 +782,7 @@ class LLaVATrainer(Trainer):
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
 
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+    def _get_train_sampler(self,dataset=None) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
@@ -778,7 +795,7 @@ class LLaVATrainer(Trainer):
                 group_by_modality=True,
             )
         else:
-            return super()._get_train_sampler()
+            return super()._get_train_sampler(dataset)
 
     def create_optimizer(self):
         """
@@ -789,7 +806,7 @@ class LLaVATrainer(Trainer):
         """
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
-        if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+        if self.sharded_ddp == "simple":
             return super().create_optimizer()
 
         opt_model = self.model
@@ -860,7 +877,7 @@ class LLaVATrainer(Trainer):
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
-            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+            if self.sharded_ddp == "simple":
                 self.optimizer = OSS(
                     params=optimizer_grouped_parameters,
                     optim=optimizer_cls,
