@@ -27,7 +27,7 @@ from llamavid.model.language_model.llama_uav import LlamaUAVModel, LlamaUAVForCa
 from llamavid.constants import WAYPOINT_LABEL_TOKEN
 
 class LlavaConfig(LlamaConfig):
-    model_type = "llava"
+    model_type = "llava_llama_uav"
 
 class LlavaAttLlamaModel(LLaMAVIDMetaModel, LlamaUAVModel):
     config_class = LlavaConfig
@@ -207,5 +207,5 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         )
         return model_inputs
 
-AutoConfig.register("llava", LlavaConfig)
+AutoConfig.register("llava_llama_uav", LlavaConfig)
 AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaAttForCausalLM)

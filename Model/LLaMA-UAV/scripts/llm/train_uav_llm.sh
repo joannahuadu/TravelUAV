@@ -4,12 +4,12 @@
 root_dir=/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
 deepspeed \
-    --include localhost:0 \
+    --include localhost:1,2,3,4 \
     --master_port 29101 \
     $model_dir/llamavid/train/train_uav/train_uav_notice.py \
     --data_path $root_dir/data/uav_dataset/trainset.json \
     --dataset_path /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV \
-    --output_dir $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32 \
+    --output_dir $model_dir/work_dirs/llama-vid-7b-pretrain-224-uav-full-data-lora32_bs128 \
     --deepspeed $model_dir/scripts/zero2.json \
     --model_name_or_path $model_dir/model_zoo/vicuna-7b-v1.5/ \
     --version imgsp_uav \
@@ -28,13 +28,13 @@ deepspeed \
     --pretrain_qformer $model_dir/model_zoo/LAVIS/instruct_blip_vicuna7b_trimmed.pth \
     --compress_type "mean" \
     --bf16 True \
-    --num_train_epochs 10 \
+    --num_train_epochs 2 \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 2 \
+    --gradient_accumulation_steps 8 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 1000 \
+    --save_steps 500 \
     --save_total_limit 1 \
     --learning_rate 5e-4 \
     --weight_decay 0. \

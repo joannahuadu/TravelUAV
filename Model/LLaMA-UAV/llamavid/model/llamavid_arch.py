@@ -154,8 +154,11 @@ class LLaMAVIDMetaModel:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
             if not for_eval:
-                weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
-                model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
+                if not os.path.isfile(os.path.join(model_idx_path, 'pytorch_model.bin.index.json')):
+                    model_path = {}
+                else:
+                    weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
+                    model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             else:
                 model_path = set()
                 model_path.add('mm_projector.bin')
@@ -597,7 +600,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 if history_image_features[cur_image_idx] is not None:
                     history_image_feature = history_image_features[cur_image_idx][token_idx]
                 else:
-                    history_image_feature = torch.tensor([]).view(0, 4096).to(input_ids.device)
+                    history_image_feature = torch.tensor([]).view(0, current_image_feature.shape[1]).to(input_ids.device)
                 history_waypoint_feature = history_waypoint_features[cur_image_idx][token_idx]
 
                 if history_waypoint_indice is not None and history_image_indice is not None:
