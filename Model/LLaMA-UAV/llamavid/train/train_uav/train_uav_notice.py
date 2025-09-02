@@ -34,7 +34,7 @@ import torch
 
 import transformers
 
-import llamavid.qwen2
+# import llamavid.qwen2
 from llamavid.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, WAYPOINT_INPUT_TOKEN, WAYPOINT_LABEL_TOKEN, DEFAULT_WP_TOKEN, DEFAULT_HISTORY_TOKEN, WP_TOKEN_INDEX, HIS_TOKEN_INDEX
 from torch.utils.data import Dataset
 from llamavid.train.llava_trainer import LLaVATrainer
