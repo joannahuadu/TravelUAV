@@ -299,8 +299,8 @@ class AirVLNSimulatorClientTool:
         adaptive_lookahead=1
         def move_path(airsim_client: airsim.VehicleClient, waypoints, start_state):
             results = []
-            state_sensor = State(airsim_client, )
-            imu_sensor = Imu(airsim_client, imu_name='Imu')
+            state_sensor = State(airsim_client, ) # Initialize state sensor
+            imu_sensor = Imu(airsim_client, imu_name='Imu') # Initialize imu sensor
             path = [airsim.Vector3r(*waypoint[0:3]) for waypoint in waypoints]
             airsim_client.enableApiControl(True)
             airsim_client.armDisarm(True)
@@ -320,7 +320,8 @@ class AirVLNSimulatorClientTool:
             collision = False
             distance = 10000
             while True:
-                time.sleep(0.005)
+                # time.sleep(0.005)
+                time.sleep(0.01)
                 if time.perf_counter() - start_time > 5:
                     return None
                 target = path[current_idx]
