@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES=8 python -u $root_dir/src/vlnce_src/eval.py \
     --use_gt True \
     --maxWaypoints 200 \
     --dataset_path /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/ \
-    --eval_save_path /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/eval_closeloop_qwen0.5b128_1/ \
+    --eval_save_path /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/eval_closeloop_qwen0.5b128_all/ \
     --model_path $model_dir/work_dirs/qwen-vid-0.5b-pretrain-224-uav-full-data-lora32_bs128 \
     --model_base $model_dir/model_zoo/Qwen2-0.5B \
     --vision_tower $model_dir/model_zoo/LAVIS/eva_vit_g.pth \
