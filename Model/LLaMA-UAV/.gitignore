@@ -33,3 +33,4 @@ ckpts*
 # DevContainer
 !.devcontainer/*
 
+*jobs/

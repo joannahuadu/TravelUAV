@@ -23,7 +23,7 @@ class DinoMonitor:
             return cls._instance
         return cls._instance
         
-    def __init__(self, device=0):
+    def __init__(self, device="cuda:0"):
         self.dino_model = None
         self.init_dino_model(device)
         self.object_desc_dict = dict()

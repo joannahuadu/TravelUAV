@@ -1,3 +1,6 @@
+msgpack-rpc-python
+msgpack
+backports.ssl_match_hostname
 accelerate
 addict
 aiofiles
@@ -59,8 +62,6 @@ matplotlib
 mdit-py-plugins
 mdurl
 mpmath
-msgpack
-msgpack-rpc-python
 multidict
 narwhals
 networkx
