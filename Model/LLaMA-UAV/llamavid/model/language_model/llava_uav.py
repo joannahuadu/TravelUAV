@@ -19,23 +19,23 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
-from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig
+from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig, LlamaModel, LlamaForCausalLM
 
-from llamavid.model.llamavid_arch import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM
-from llamavid.model.language_model.llama_uav import LlamaUAVModel, LlamaUAVForCausalLM, CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
-
+from llamavid.model.language_model.llama_uav import CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
 from llamavid.constants import WAYPOINT_LABEL_TOKEN
 
-class LlavaConfig(LlamaConfig):
-    model_type = "llava_llama_uav"
+from llava.model import *
+from llava.model.llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 
-class LlavaAttLlamaModel(LLaMAVIDMetaModel, LlamaUAVModel):
+class LlavaConfig(LlamaConfig):
+    model_type = "llava_uav"
+
+class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
     config_class = LlavaConfig
 
     def __init__(self, config: LlamaConfig):
-        super(LlavaAttLlamaModel, self).__init__(config)
+        super(LlavaLlamaModel, self).__init__(config)
  
-        
 class CosineDirectionLoss(nn.Module):
     def __init__(self):
         super(CosineDirectionLoss, self).__init__()
@@ -44,18 +44,16 @@ class CosineDirectionLoss(nn.Module):
         cosine_sim = F.cosine_similarity(vec1, vec2, dim=-1)
         loss = 1 - cosine_sim
         return loss.mean()
-    
 
-class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
+class LlavaUAVForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
     config_class = LlavaConfig
     def __init__(self, config, **model_args):
-        super(LlamaUAVForCausalLM, self).__init__(config)
-        self.model = LlavaAttLlamaModel(config)
+        super(LlamaForCausalLM, self).__init__(config)
+        self.model = LlavaLlamaModel(config)
         self.use_angle_and_norm_loss = model_args.get('use_angle_and_norm_loss', True)
-        # self.
-        # TODO: set LLaMAVIDMetaForCausalLM config
+        self.pretraining_tp = config.pretraining_tp
+        self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
         self.waypoint_emb = nn.Embedding(1, config.hidden_size)
         self.waypoints_fc = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 2),
@@ -65,9 +63,9 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         self.waypoints_output = nn.Linear(64, 4)
         
         self.history_preprocessor = nn.Sequential(
-            nn.Linear(3, 4096 // 2),
+            nn.Linear(3, config.hidden_size // 2),
             nn.ReLU(),
-            nn.Linear(4096 // 2, 4096),
+            nn.Linear(config.hidden_size // 2, config.hidden_size),
         )
         
         self.waypoints_loss_func = torch.nn.L1Loss()
@@ -95,6 +93,7 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -102,7 +101,7 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
-        prompts: Optional[List[str]] = None,
+        image_sizes: Optional[List[List[int]]] = None,
         waypoints: Optional[torch.FloatTensor] = None,
         orientations: Optional[torch.FloatTensor] = None,
         historys: Optional[torch.FloatTensor] = None,
@@ -143,13 +142,14 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
             history_embed = self.history_preprocessor(info)
             history_embeds.append(history_embed)
             
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
+        input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, image_sizes)
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
@@ -211,5 +211,5 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         )
         return model_inputs
 
-AutoConfig.register("llava_llama_uav", LlavaConfig, exist_ok=True)
-AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaAttForCausalLM)
+AutoConfig.register("llava_uav", LlavaConfig)
+AutoModelForCausalLM.register(LlavaConfig, LlavaUAVForCausalLM)

@@ -45,3 +45,4 @@ __pycache__/
 *.csv
 *.sh
 traj*
+*.out
