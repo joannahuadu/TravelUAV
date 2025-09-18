@@ -403,7 +403,7 @@ class LLaVATrainer(Trainer):
         if not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        self.state = TrainerState()
+        self.state = TrainerState(logging_steps=args.logging_steps, save_steps=args.save_steps)
         self.state.is_hyper_param_search = trial is not None
 
         # Activate gradient checkpointing if needed
@@ -453,7 +453,7 @@ class LLaVATrainer(Trainer):
             deepspeed_load_checkpoint(self.model_wrapped, resume_from_checkpoint)
 
         # Check if saved optimizer or scheduler states exist
-        self._load_optimizer_and_scheduler(resume_from_checkpoint)
+        # self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
         # important: at this point:
         # self.model         is the Transformers Model
@@ -620,7 +620,7 @@ class LLaVATrainer(Trainer):
                     if args.max_grad_norm is not None and args.max_grad_norm > 0:
                         # deepspeed does its own clipping
 
-                        if self.do_grad_scaling:
+                        if getattr(self, "do_grad_scaling", False):
                             # Reduce gradients first for XLA
                             if is_torch_tpu_available():
                                 gradients = xm._fetch_gradients(self.optimizer)
@@ -651,13 +651,13 @@ class LLaVATrainer(Trainer):
                     # Optimizer step
                     optimizer_was_run = True
                     if is_torch_tpu_available():
-                        if self.do_grad_scaling:
+                        if getattr(self, "do_grad_scaling", False):
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                         else:
                             # tpu-comment: accelerate wrapped optimizers call xm.optimizer_step
                             self.optimizer.step()
-                    elif self.do_grad_scaling:
+                    elif getattr(self, "do_grad_scaling", False):
                         scale_before = self.scaler.get_scale()
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -785,7 +785,7 @@ class LLaVATrainer(Trainer):
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
-        if self.do_grad_scaling:
+        if getattr(self, "do_grad_scaling", False):
             self.scaler.scale(loss).backward()
         elif self.use_apex:
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:

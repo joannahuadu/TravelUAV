@@ -1,5 +1,5 @@
-from llamavid.train.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
-replace_llama_attn_with_flash_attn()
+# from llamavid.train.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
+# replace_llama_attn_with_flash_attn()
 # Adopted from https://github.com/lm-sys/FastChat. Below is the original copyright:
 # Adopted from tatsu-lab@stanford_alpaca. Below is the original copyright:
 #    Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
@@ -307,7 +307,8 @@ def smarter_tokenizer_and_embedding_resize(
             dim=0, keepdim=True)
         output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
             dim=0, keepdim=True)
-
+        model.get_input_embeddings().weight.requires_grad_(True)
+        model.get_output_embeddings().weight.requires_grad_(True)
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
@@ -1092,7 +1093,7 @@ def train():
         ModelClass = LlavaLlamaAttForCausalLM
     elif "Qwen" in model_args.model_name_or_path:
         ModelClass = LlavaQwenAttForCausalLM
-        config._attn_implementation = 'eager'
+        # config._attn_implementation = 'eager'
     else:
         raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
 
@@ -1169,7 +1170,8 @@ def train():
         if tokenizer.unk_token:
             tokenizer.pad_token = tokenizer.unk_token
         else: #TODO: NOT SURE!
-            tokenizer.add_special_tokens({"unk_token": "<unk>"})
+            tokenizer.unk_token = "<unk>"
+            # tokenizer.add_special_tokens({"unk_token": "<unk>"})
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
