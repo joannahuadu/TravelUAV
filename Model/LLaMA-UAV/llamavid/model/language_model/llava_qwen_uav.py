@@ -109,6 +109,7 @@ class LlavaQwenAttForCausalLM(QwenUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         historys: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         return_waypoints: Optional[bool] = False,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPastUAV]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -157,6 +158,9 @@ class LlavaQwenAttForCausalLM(QwenUAVForCausalLM, LLaMAVIDMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict
         )
+        if output_attentions and  "save_attentions" in kwargs:
+            torch.save(outputs.attentions, kwargs["save_attentions"])
+            
         hidden_states = outputs[0]
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         predicted_waypoints = self.forward_waypoint(waypoints_feat)

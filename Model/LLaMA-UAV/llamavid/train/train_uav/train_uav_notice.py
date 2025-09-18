@@ -1127,7 +1127,7 @@ def train():
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
             target_modules=find_all_linear_names(model),
-            layers_to_transform=[i for i in range(0, 32)], 
+            layers_to_transform=[i for i in range(0, config.num_hidden_layers)], 
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             task_type="CAUSAL_LM",
@@ -1168,8 +1168,11 @@ def train():
     else:
         if tokenizer.unk_token:
             tokenizer.pad_token = tokenizer.unk_token
-        else: #TODO: NOT SURE!
-            tokenizer.add_special_tokens({"unk_token": "<unk>"})
+        else: #TODO: wmq. NOT SURE!
+            tokenizer.unk_token = "<unk>"
+            # tokenizer.pad_token = tokenizer.unk_token
+            # tokenizer.add_special_tokens({"unk_token": "<unk>"})
+            # model.resize_token_embeddings(len(tokenizer))
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
