@@ -36,11 +36,18 @@ class CosineDirectionLoss(nn.Module):
         loss = 1 - cosine_sim
         return loss.mean()
 
-class QwenVLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
+class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
+    _checkpoint_conversion_mapping = {
+        "^visual": "model.visual",
+        r"^model(?!\.(language_model|visual))": "model.language_model",
+    }
+    _tied_weights_keys = ["lm_head.weight"]
     config_class = QwenConfig
     def __init__(self, config, **model_args):
-        super(Qwen2_5_VLForConditionalGeneration, self).__init__(config)
+        super().__init__(config)
         self.use_angle_and_norm_loss = model_args.get('use_angle_and_norm_loss', True)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.waypoint_emb = nn.Embedding(1, config.hidden_size)
         self.waypoints_fc = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 2),
@@ -125,27 +132,48 @@ class QwenVLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
 
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
+            if pixel_values is not None:
+                image_embeds = self.model.get_image_features(pixel_values, image_grid_thw)
+                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
+                n_image_features = image_embeds.shape[0]
+                if n_image_tokens != n_image_features:
+                    raise ValueError(
+                        f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+                    )
 
-        if pixel_values is not None:
-            image_embeds = self.model.get_image_features(pixel_values, image_grid_thw)
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            image_mask, _ = self.model.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+                mask = input_ids == self.config.image_token_id
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                image_mask = mask_expanded.to(inputs_embeds.device)
 
-        if pixel_values_videos is not None:
-            video_embeds = self.model.get_video_features(pixel_values_videos, video_grid_thw)
-            video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            _, video_mask = self.model.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
-            )
-            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if pixel_values_videos is not None:
+                video_embeds = self.model.get_video_features(pixel_values_videos, video_grid_thw)
+                n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
+                n_video_features = video_embeds.shape[0]
+                if n_video_tokens != n_video_features:
+                    raise ValueError(
+                        f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                    )
+
+                mask = input_ids == self.config.video_token_id
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                video_mask = mask_expanded.to(inputs_embeds.device)
+
+                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(inputs_embeds.device)
 
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(
+            second_per_grid_ts=second_per_grid_ts,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -155,7 +183,6 @@ class QwenVLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            **kwargs,
         )
         if output_attentions and  "save_attentions" in kwargs:
             torch.save(outputs.attentions, kwargs["save_attentions"])
@@ -190,4 +217,4 @@ class QwenVLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
         )
 
 AutoConfig.register("qwenvl_uav", QwenConfig)
-AutoModelForCausalLM.register(QwenConfig, QwenVLUAVForCausalLM)
+AutoModelForCausalLM.register(QwenConfig, Qwen2_5_VLUAVForCausalLM)

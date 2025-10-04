@@ -315,6 +315,17 @@ conv_llava_plain_guided = Conversation(
     sep="\n",
 )
 
+conv_qwen_plain_guided = Conversation(
+    system="",
+    roles=("", ""),
+    version="imgsp_qwen",
+    messages=(
+    ),
+    offset=0,
+    sep_style=SeparatorStyle.PLAIN,
+    sep="\n",
+)
+
 
 # default_conversation = conv_vicuna_imgsp_v1
 default_conversation = conv_vicuna_imgsp_uav
@@ -325,6 +336,7 @@ conv_templates = {
     "imgsp_v1": conv_vicuna_imgsp_v1,
     "imgsp_uav": conv_vicuna_imgsp_uav,
     "plain_guided": conv_llava_plain_guided,
+    "imgsp_qwen":conv_qwen_plain_guided
 }
 
 

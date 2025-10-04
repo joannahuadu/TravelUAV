@@ -132,7 +132,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         # Only save Adapter
         # keys_to_match = ['mm_projector']
         keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att', 'waypoint_emb', 'waypoints_fc', 'waypoints_predictor',
-                         'waypoints_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens'] # 'end_predictor',
+                         'waypoints_output', 'action_emb', 'actions_fc', 'actions_predictor', 'actions_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger'] # 'end_predictor',
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 
@@ -999,7 +999,7 @@ class LLaVATrainer(Trainer):
                     self.model.named_parameters(), self.args.lora_bias
                 )
                 non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-                    self.model.model.named_parameters()
+                    self.model.named_parameters()
                 )
                 if self.args.local_rank == 0 or self.args.local_rank == -1:
                     self.model.config.save_pretrained(self.args.output_dir)
@@ -1013,7 +1013,8 @@ class LLaVATrainer(Trainer):
             
             self.args.output_dir = run_dir
         else:
-            super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
+            print("super(LLaVATrainer, self)._save_checkpoint(model, trial)")
+            super(LLaVATrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
