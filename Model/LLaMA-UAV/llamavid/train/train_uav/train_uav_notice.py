@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, List, Union
 import pickle
 import math
 import time
@@ -583,7 +583,7 @@ def preprocess_imgsp_qwen(
     for i, sentence in enumerate(sources):
         user_content = []
         for _ in range(len(has_image)):
-            user_content.append({"type": "image"})  # Qwen 会用占位符计数来对齐 images
+            user_content.append({"type": "image"})
         user_content.append({"type": "text", "text": sentence})
         messages = [
             system_message, 
@@ -731,7 +731,7 @@ def preprocess_imgsp_uav(
 
 def preprocess(
     sources: Sequence[str],
-    images: Image.Image,
+    images: Union[Image.Image, List[Image.Image]],
     tokenizer: transformers.PreTrainedTokenizer,
     has_image: bool = False,
     prompt: str = None,
