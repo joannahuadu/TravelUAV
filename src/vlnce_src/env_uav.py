@@ -129,6 +129,9 @@ class AirVLNENV:
             map_name, seq_name = path_parts[-3], path_parts[-2]
             if (len(self.activate_maps) > 0 and map_name not in self.activate_maps) or seq_name in skipped_trajectory_set:
                 continue
+            # if not seq_name in ["ab098a2d-0c05-41dc-b568-1af9b5a3b3e3", "e4fb8f38-eda1-4964-a569-2ba1eed05cf3"]: 
+            #     # "955faecf-27d6-4aac-a9ad-f1d481d67dbf" 
+            #     continue
             mark_json = merged_json.replace('merged_data.json', 'mark.json')
             with open(mark_json, 'r') as f:
                 mark_json = json.load(f)

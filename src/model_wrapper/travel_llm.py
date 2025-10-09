@@ -30,7 +30,7 @@ class TravelModelWrapper(BaseModelWrapper):
             inputs.append(input_item)
             rot_to_targets.append(rot_to_target)
         batch = inputs_to_batch(tokenizer=self.tokenizer, instances=inputs)
-
+        # TODO: wmq modify.
         inputs_device = {k: v.to(self.model.device) for k, v in batch.items() 
             if 'prompts' not in k and 'images' not in k and 'historys' not in k}
         inputs_device['prompts'] = [item for item in batch['prompts']]
@@ -43,6 +43,7 @@ class TravelModelWrapper(BaseModelWrapper):
         return inputs_device, rot_to_targets
 
     def run_llm_model(self, inputs):
+        # inputs['output_attentions'] = True
         waypoints_llm = self.model(**inputs).cpu().to(dtype=torch.float32).numpy()
         waypoints_llm_new = []
         for waypoint in waypoints_llm:

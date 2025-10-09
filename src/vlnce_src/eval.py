@@ -46,7 +46,9 @@ def eval(model_wrapper: BaseModelWrapper, assist: Assist, eval_env: AirVLNENV, e
                 is_terminate = batch_state.check_batch_termination(t)
                 if is_terminate:
                     break
-                
+                # if not os.path.exists(os.path.join(model_args.model_path, "attention")):
+                #     os.makedirs(os.path.join(model_args.model_path, "attention"))
+                # inputs["save_attentions"] = os.path.join(model_args.model_path, "attention", "{}_{}.pt".format(env_batchs[0]["seq_name"], t))
                 refined_waypoints = model_wrapper.run(inputs=inputs, episodes=batch_state.episodes, rot_to_targets=rot_to_targets)
                 eval_env.makeActions(refined_waypoints)
                 outputs = eval_env.get_obs()

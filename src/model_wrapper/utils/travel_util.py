@@ -240,7 +240,7 @@ def transform_point(point, rotation_matrix):
 
 
 def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, target_point, assist_notice = None):
-
+    # TODO: wmq modify.
     ori_sources = None
     input_prompt = data_args.input_prompt
     refine_prompt = data_args.refine_prompt
@@ -322,6 +322,7 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
 
 
 def inputs_to_batch(tokenizer, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+    # TODO: wmq modify.
         input_ids, labels = tuple([instance[key] for instance in instances]
                                   for key in ("input_ids", "labels"))
         input_ids = torch.nn.utils.rnn.pad_sequence(

@@ -25,6 +25,7 @@ from peft import PeftModel
 
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
+    # TODO: wmq modify.
     kwargs = {"device_map": device_map}
 
     if load_8bit:
