@@ -292,6 +292,18 @@ conv_vicuna_imgsp_uav = Conversation(
     sep2="</s>",
 )
 
+conv_llava_imgsp_uav = Conversation(
+    system="A chat between a curious user and an artificial intelligence assistant. "
+    "The assistant is a navigation model that output the uav waypoints or actions according to the user's instructions and images.",
+    roles=("USER", "ASSISTANT"),
+    version="imgsp_llava",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.TWO,
+    sep=" ",
+    sep2="</s>",
+)
+
 conv_vicuna_v1 = Conversation(
     system="A chat between a curious user and an artificial intelligence assistant. "
     "The assistant gives helpful, detailed, and polite answers to the user's questions.",
@@ -336,7 +348,8 @@ conv_templates = {
     "imgsp_v1": conv_vicuna_imgsp_v1,
     "imgsp_uav": conv_vicuna_imgsp_uav,
     "plain_guided": conv_llava_plain_guided,
-    "imgsp_qwen":conv_qwen_plain_guided
+    "imgsp_qwen":conv_qwen_plain_guided,
+    "imgsp_llava": conv_llava_imgsp_uav,
 }
 
 

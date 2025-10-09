@@ -278,67 +278,327 @@
 
 
 
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-from PIL import Image
+# from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+# from PIL import Image
 
-model_path = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/Qwen2.5-VL-7B-Instruct"
+# model_path = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/Qwen2.5-VL-7B-Instruct"
 
-processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    model_path, device_map="auto", trust_remote_code=True
-).eval()
+# processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+# model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+#     model_path, device_map="auto", trust_remote_code=True
+# ).eval()
 
-# 五张图像
-image_paths = [
-    "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_0.png",
-    "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_1.png",
-    "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_2.png",
-    "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_3.png",
-    "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_4.png",
-]
-images = [Image.open(p).convert("RGB") for p in image_paths]
+# # 五张图像
+# image_paths = [
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_0.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_1.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_2.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_3.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_4.png",
+# ]
+# images = [Image.open(p).convert("RGB") for p in image_paths]
 
-sentence = "请根据这些图片描述场景。"
-user_content = [{"type": "image"} for _ in images]
-user_content.append({
-    "type": "text",
-    "text": "These five images respectively come from five perspectives: "
-            "frontcamera, leftcamera, rightcamera, rearcamera, downcamera.\n\n" + sentence
-})
-messages = [
-    {
-        "role": "system",
-        "content": [{"type": "text", "text": "You are a helpful assistant."}]
-    },
-    {"role": "user", "content": user_content},
-]
+# sentence = "请根据这些图片描述场景。"
+# user_content = [{"type": "image"} for _ in images]
+# user_content.append({
+#     "type": "text",
+#     "text": "These five images respectively come from five perspectives: "
+#             "frontcamera, leftcamera, rightcamera, rearcamera, downcamera.\n\n" + sentence
+# })
+# messages = [
+#     {
+#         "role": "system",
+#         "content": [{"type": "text", "text": "You are a helpful assistant."}]
+#     },
+#     {"role": "user", "content": user_content},
+# ]
 
-# 构造单条 prompt
-prompt = processor.apply_chat_template(
-    messages, tokenize=False, add_generation_prompt=True
-)
+# # 构造单条 prompt
+# prompt = processor.apply_chat_template(
+#     messages, tokenize=False, add_generation_prompt=True
+# )
 
-# ===== Batch size 32 =====
-batch_prompts = [prompt for _ in range(32)]
-batch_images = [images for _ in range(32)]  # 每条样本对应同一组五张图
+# # ===== Batch size 32 =====
+# batch_prompts = [prompt for _ in range(32)]
+# batch_images = [images for _ in range(32)]  # 每条样本对应同一组五张图
 
-# 编码
-inputs = processor(
-    text=batch_prompts,
-    images=batch_images,   # 这里是 list of list[Image]
-    return_tensors="pt",
-    padding=True
-).to(model.device)
+# # 编码
+# inputs = processor(
+#     text=batch_prompts,
+#     images=batch_images,   # 这里是 list of list[Image]
+#     return_tensors="pt",
+#     padding=True
+# ).to(model.device)
 
-# 推理
-generated_ids = model.generate(**inputs, max_new_tokens=512)
+# # 推理
+# generated_ids = model.generate(**inputs, max_new_tokens=512)
 
-# 解码（取续写部分）
-gen_only = [
-    out[input_ids.shape[-1]:] for out, input_ids in zip(generated_ids, inputs["input_ids"])
-]
-output_texts = processor.batch_decode(gen_only, skip_special_tokens=True)
+# # 解码（取续写部分）
+# gen_only = [
+#     out[input_ids.shape[-1]:] for out, input_ids in zip(generated_ids, inputs["input_ids"])
+# ]
+# output_texts = processor.batch_decode(gen_only, skip_special_tokens=True)
 
-for i, txt in enumerate(output_texts):
-    print(f"=== Sample {i} ===")
-    print(txt)
+# for i, txt in enumerate(output_texts):
+#     print(f"=== Sample {i} ===")
+#     print(txt)
+
+
+# import torch
+# from transformers import AutoProcessor, LlavaNextForConditionalGeneration
+# from PIL import Image
+
+# # ===== 1) 选择 LLaVA 多图模型（示例：LLaVA-1.6 7B）=====
+# # 也可换成： "liuhaotian/llava-v1.6-mistral-7b" / "llava-hf/llava-v1.6-34b" / "llava-hf/llava-1.6-7b-hf" 等
+# model_id = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# # ===== 2) 加载模型与处理器 =====
+# processor = AutoProcessor.from_pretrained(model_id)
+# model = LlavaNextForConditionalGeneration.from_pretrained(
+#     model_id,
+#     torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+#     device_map="auto" if device == "cuda" else None,
+#     low_cpu_mem_usage=True,
+# ).eval()
+
+# # ===== 3) 准备 5 张图片 =====
+# image_paths = [
+#     # "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_0.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_1.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_2.png",
+#     # "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_3.png",
+#     # "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_4.png",
+# ]
+# images = [Image.open(p).convert("RGB") for p in image_paths]
+
+# # ===== 4) 多图对话消息（与 Qwen2.5 类似：content 里放多个 {"type":"image"}）=====
+# sentence = "请根据这些图片描述场景。"
+# user_content = [{"type": "image"} for _ in images]
+# user_content.append({
+#     "type": "text",
+#     "text": "These two images respectively come from two perspectives: "
+#             "leftcamera, rightcamera.\n\n" + sentence
+# })
+
+# messages = [
+#     {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant."}]},
+#     {"role": "user", "content": user_content},
+# ]
+
+# # ===== 5) 构造单条 prompt（LLaVA 也用 chat template）=====
+# prompt = processor.apply_chat_template(
+#     messages, tokenize=False, add_generation_prompt=True
+# )
+
+# # ===== 6) 批量：32 条样本，共用同一组 5 张图 =====
+# B = 4
+# batch_prompts = [prompt for _ in range(B)]
+# batch_images = [images for _ in range(B)]  # list[list[PIL.Image]]
+
+# # ===== 7) 编码（关键：images 传 “list of list[PIL.Image]” 与 prompt 一一对应）=====
+# inputs = processor(
+#     text=batch_prompts,
+#     images=batch_images,
+#     return_tensors="pt",
+#     padding=True
+# )
+# print(inputs['image_sizes'].shape)
+# inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
+# # ===== 8) 生成 =====
+# with torch.inference_mode():
+#     generated_ids = model.generate(
+#         **inputs,
+#         max_new_tokens=512,
+#         temperature=0.2,
+#         do_sample=False,
+#     )
+
+# # ===== 9) 只取续写部分并解码 =====
+# gen_only = [
+#     out[input_ids.shape[-1]:] for out, input_ids in zip(generated_ids, inputs["input_ids"])
+# ]
+# output_texts = processor.batch_decode(gen_only, skip_special_tokens=True)
+
+# for i, txt in enumerate(output_texts):
+#     print(f"=== Sample {i} ===")
+#     print(txt)
+
+
+# # Load model directly
+# from transformers import AutoProcessor, AutoModelForVision2Seq
+
+# processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
+# model = AutoModelForVision2Seq.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
+# messages = [
+#     {
+#         "role": "user",
+#         "content": [
+#             {"type": "image", "url": "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/candy.JPG"},
+#             {"type": "text", "text": "What animal is on the candy?"}
+#         ]
+#     },
+# ]
+# inputs = processor.apply_chat_template(
+# 	messages,
+# 	add_generation_prompt=True,
+# 	tokenize=True,
+# 	return_dict=True,
+# 	return_tensors="pt",
+# ).to(model.device)
+
+# outputs = model.generate(**inputs, max_new_tokens=40)
+# print(processor.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
+
+
+
+# import torch
+# from transformers import AutoProcessor, LlavaNextForConditionalGeneration
+# from PIL import Image
+# from llava.model import *
+# from llamavid.model import *
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# image_paths = [
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_0.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_1.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_2.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_3.png",
+#     "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/frame_4.png",
+# ]
+# images = [Image.open(p).convert("RGB") for p in image_paths]
+# from transformers import AutoProcessor, AutoModelForCausalLM
+# import transformers
+# import sys
+# sys.path.append("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/llamavid/train/train_uav/")
+# from train_uav_notice import ModelArguments, DataArguments, TrainingArguments
+# import numpy as np
+# model_name_or_path = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.5-7b-224"
+
+# config = transformers.AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+
+# bnb_model_from_pretrained_args = dict(torch_dtype=torch.bfloat16)
+# model = LlavaUAVForCausalLM.from_pretrained(
+#     model_name_or_path,
+#     use_angle_and_norm_loss=True,
+#     config=config,
+#     cache_dir=None,
+#     device_map="auto" if device == "cuda" else None,
+#     **bnb_model_from_pretrained_args
+# ).eval()
+
+# model_args = ModelArguments(
+#     model_name_or_path="/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.5-7b-224/",
+#     version="imgsp_uav",
+#     freeze_backbone=False,
+#     tune_mm_mlp_adapter=True,
+#     tune_waypoint_predictor=True,
+#     vision_tower="/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/clip-vit-large-patch14",
+#     image_processor=None,
+#     mm_vision_select_layer=-2,
+#     pretrain_mm_mlp_adapter=None,
+#     mm_projector_type="mlp2x_gelu",
+#     mm_use_im_start_end=False,
+#     mm_use_im_patch_token=False,
+#     mm_patch_merge_type="flat",
+#     mm_vision_select_feature="patch",
+#     bert_type="qformer_pretrain_freeze",
+#     num_query=32,
+#     pretrain_qformer=None,
+#     compress_type="mean",
+#     use_angle_and_norm_loss=True,
+# )
+
+# model.get_model().initialize_vision_modules(
+#     model_args=model_args,
+#     fsdp=""
+# )
+# vision_tower = model.get_vision_tower()
+# processer = vision_tower.image_processor
+# pro_images = []
+# for image in images:
+#       imgs = np.array(image).reshape(-1, 256, 256, 3)
+#       imgs = processer.preprocess(imgs, return_tensors='pt')['pixel_values'].to(dtype=torch.bfloat16)
+#       pro_images.append(imgs)
+# pro_images = np.array(pro_images)
+# from transformers import AutoTokenizer
+# from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
+# from llava.conversation import conv_templates
+# from llava.mm_utils import tokenizer_image_token
+
+# tokenizer = AutoTokenizer.from_pretrained(
+#     model_name_or_path,
+#     use_fast=False,
+#     trust_remote_code=True
+# )
+# if tokenizer.pad_token is None:
+#     tokenizer.pad_token = tokenizer.eos_token  # 防止后续需要pad时报错
+
+# # ===== 2) 写 conversations（含 5 个 <image>）=====
+# # 选择一个合适的对话模板（llava_v1 常见；若你的权重自带自定义模板，也可替换成相应 key）
+# conv = conv_templates["llava_v1"].copy()
+# conv.system_message = "你是一名多模态无人机导航与感知助手。"
+
+# # 拼接 5 个 <image> 占位符（当前配置 mm_use_im_start_end=False，直接用 <image>）
+# image_tokens = "\n".join([DEFAULT_IMAGE_TOKEN] * 5)
+
+# # 用户输入里先放 5 张图的占位，再接具体问题/指令
+# user_prompt = (
+#     f"{image_tokens}\n"
+#     "请根据以上 5 帧图像，描述无人机的位姿变化趋势，并给出关键航点与朝向的估计。"
+# )
+
+# conv.append_message(conv.roles[0], user_prompt)
+# conv.append_message(conv.roles[1], None)  # 模型待回复
+
+# # 得到最终可喂给 tokenizer 的纯文本 prompt（其中 <image> 会按 IMAGE_TOKEN_INDEX 处理）
+# prompt = conv.get_prompt()
+
+# # ===== 3) 利用 llava 的 tokenizer_image_token 得到 input_ids =====
+# # 注意：这里不会处理图像张量本身；只是把文本里的 <image> 映射到 IMAGE_TOKEN_INDEX
+# input_ids = tokenizer_image_token(
+#     prompt,
+#     tokenizer,
+#     IMAGE_TOKEN_INDEX,
+#     return_tensors="pt"
+# ).to(device)
+
+# # （可选）做个小检查：确认确实包含了 IMAGE_TOKEN_INDEX，且一共出现 5 次
+# ids_list = input_ids[0].tolist()
+# num_image_tokens = sum(1 for t in ids_list if t == IMAGE_TOKEN_INDEX)
+# print("IMAGE_TOKEN_INDEX:", IMAGE_TOKEN_INDEX)
+# print("input_ids shape:", input_ids.shape)
+# print("num <image> tokens:", num_image_tokens)
+
+# # （可选）查看前若干个 token 对应的字符串，确认可读性
+# preview = tokenizer.convert_ids_to_tokens(ids_list[:60], skip_special_tokens=False)
+# print(preview)
+
+# data_dict = {}
+# data_dict['input_ids'] = input_ids
+# data_dict['images'] = pro_images
+# with torch.inference_mode():
+#     generated_ids = model.generate(
+#         **inputs,
+#         max_new_tokens=512,
+#         temperature=0.2,
+#         do_sample=False,
+#     )
+
+# # ===== 9) 只取续写部分并解码 =====
+# gen_only = [
+#     out[input_ids.shape[-1]:] for out, input_ids in zip(generated_ids, inputs["input_ids"])
+# ]
+# output_texts = processor.batch_decode(gen_only, skip_special_tokens=True)
+
+# for i, txt in enumerate(output_texts):
+#     print(f"=== Sample {i} ===")
+#     print(txt)
+
+
+import json
+with open('/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/NewYorkCity/b096e59f-9e34-482f-ab11-1ac3507aba06/merged_data.json', 'r') as f:
+    data = json.load(f)
+    
+# print(data.keys)
+print(data['conversations'])
