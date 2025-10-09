@@ -7,27 +7,36 @@ name = "llamavid"
 version = "1.0"
 description = "LLaMA-VID"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-    "llava@git+https://github.com/haotian-liu/LLaVA.git@1619889c712e347be1cb4f78ec66e7cf414ac1a6",
-    "einops", "fastapi", "gradio==3.35.2", "markdown2[all]", "numpy",
-    "requests", "sentencepiece", "tokenizers>=0.12.1",
-    "torch==2.0.1", "torchvision==0.15.2", "uvicorn", "wandb",
-    "shortuuid", "httpx==0.24.0",
-    "deepspeed==0.9.5",
-    "peft==0.4.0",
-    "transformers==4.31.0",
-    "accelerate==0.21.0",
-    "bitsandbytes==0.41.0",
-    "scikit-learn==1.2.2",
-    "sentencepiece==0.1.99",
-    "einops==0.6.1", "einops-exts==0.0.4", "timm==0.6.13",
-    "gradio_client==0.2.9",
-    "fairscale", "decord"
+    "llava@git+ssh://git@github.com/haotian-liu/LLaVA.git@0a16dea493ac62083c6c2d875de2398391f0f4a3",
+    "deepspeed",
+    "tokenizers",
+    "transformers",
+    "accelerate",
+    "bitsandbytes",
+    "decord",
+    "einops",
+    "einops-exts",
+    "fairscale",
+    "fastapi",
+    "gradio",
+    "gradio_client",
+    "httpx",
+    "markdown2[all]",
+    "numpy",
+    "peft",
+    "requests",
+    "scikit-learn",
+    "sentencepiece",
+    "shortuuid",
+    "timm",
+    "uvicorn",
+    "wandb"
 ]
 
 [project.urls]

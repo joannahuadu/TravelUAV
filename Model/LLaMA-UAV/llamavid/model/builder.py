@@ -53,9 +53,10 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 ModelClass = LlavaLlamaAttForCausalLM
             elif "Qwen" in model_base:
                 ModelClass = LlavaQwenAttForCausalLM
-                cfg_pretrained._attn_implementation = 'eager'
+                # cfg_pretrained._attn_implementation = 'eager'
             else:
                 raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
+            kwargs["ignore_mismatched_sizes"]=True
             model = ModelClass.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
             model.to(torch.bfloat16)
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')

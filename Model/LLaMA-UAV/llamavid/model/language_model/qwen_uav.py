@@ -8,7 +8,7 @@ from torch import nn
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import ModelOutput
-from llamavid.qwen2 import Qwen2Model, Qwen2ForCausalLM
+from transformers import Qwen2Model, Qwen2ForCausalLM
 from transformers.utils import add_start_docstrings_to_model_forward, logging
 
 from llamavid.model.llamavid_arch import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM

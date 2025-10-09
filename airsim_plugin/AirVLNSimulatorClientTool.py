@@ -197,7 +197,7 @@ class AirVLNSimulatorClientTool:
             assert len(result[1]) == 2, '打开场景失败'
             print('waiting for airsim connection...')
             time.sleep(3 * len(self.machines_info[index]['open_scenes']) + 35)
-            ip = result[1][0]
+            ip = result[1][0].decode('utf-8') if isinstance(result[1][0], bytes) else result[1][0]
             ports = result[1][1]
             self.airsim_ip = ip
             self.airsim_ports = ports

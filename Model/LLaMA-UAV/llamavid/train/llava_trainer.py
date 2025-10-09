@@ -20,7 +20,6 @@ from transformers.trainer_pt_utils import (
     get_parameter_names,
 )
 from transformers.trainer_utils import (
-    ShardedDDPOption,
     has_length
 )
 from transformers.utils import (
@@ -51,7 +50,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampl
 
 from transformers import __version__
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
-from transformers.deepspeed import deepspeed_init, deepspeed_load_checkpoint
+from transformers.integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_callback import (
     TrainerState,
@@ -63,7 +62,6 @@ from transformers.trainer_pt_utils import (
 )
 from transformers.trainer_utils import (
     HPSearchBackend,
-    ShardedDDPOption,
     TrainOutput,
     has_length,
     speed_metrics,
@@ -71,12 +69,25 @@ from transformers.trainer_utils import (
 from transformers.training_args import ParallelMode
 from transformers.utils import (
     is_sagemaker_mp_enabled,
-    is_torch_tpu_available,
     is_accelerate_available,
     is_apex_available,
     logging,
 )
-
+def is_torch_tpu_available(check_device: bool = True) -> bool:
+    """
+    自定义 TPU/XLA 检测。
+    check_device=True 时，尝试初始化设备。
+    """
+    try:
+        import torch_xla.core.xla_model as xm
+        if check_device:
+            try:
+                _ = xm.xla_device()
+            except Exception:
+                return False
+        return True
+    except Exception:
+        return False
 from typing import List, Optional, Union, Dict, Any
 
 logger = logging.get_logger(__name__)
@@ -121,7 +132,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         # Only save Adapter
         # keys_to_match = ['mm_projector']
         keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att', 'waypoint_emb', 'waypoints_fc', 'waypoints_predictor',
-                         'waypoints_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens'] # 'end_predictor',
+                         'waypoints_output', 'action_emb', 'actions_fc', 'actions_predictor', 'actions_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger'] # 'end_predictor',
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 
@@ -316,6 +327,7 @@ class LLaVATrainer(Trainer):
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
+        
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
 
         len_dataloader = None
@@ -367,10 +379,15 @@ class LLaVATrainer(Trainer):
                 )
             else:
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
-
+        
+        if not hasattr(self, "sharded_ddp"):
+            self.sharded_ddp = None
+        if not hasattr(self, "fsdp"):
+            self.fsdp = getattr(self.args, "fsdp", None)
+        
         delay_optimizer_creation = (
             self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
+            and self.sharded_ddp != "simple"
             or is_sagemaker_mp_enabled()
             or self.fsdp is not None
         )
@@ -386,7 +403,7 @@ class LLaVATrainer(Trainer):
         if not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        self.state = TrainerState()
+        self.state = TrainerState(logging_steps=args.logging_steps, save_steps=args.save_steps)
         self.state.is_hyper_param_search = trial is not None
 
         # Activate gradient checkpointing if needed
@@ -436,7 +453,7 @@ class LLaVATrainer(Trainer):
             deepspeed_load_checkpoint(self.model_wrapped, resume_from_checkpoint)
 
         # Check if saved optimizer or scheduler states exist
-        self._load_optimizer_and_scheduler(resume_from_checkpoint)
+        # self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
         # important: at this point:
         # self.model         is the Transformers Model
@@ -603,7 +620,7 @@ class LLaVATrainer(Trainer):
                     if args.max_grad_norm is not None and args.max_grad_norm > 0:
                         # deepspeed does its own clipping
 
-                        if self.do_grad_scaling:
+                        if getattr(self, "do_grad_scaling", False):
                             # Reduce gradients first for XLA
                             if is_torch_tpu_available():
                                 gradients = xm._fetch_gradients(self.optimizer)
@@ -634,13 +651,13 @@ class LLaVATrainer(Trainer):
                     # Optimizer step
                     optimizer_was_run = True
                     if is_torch_tpu_available():
-                        if self.do_grad_scaling:
+                        if getattr(self, "do_grad_scaling", False):
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                         else:
                             # tpu-comment: accelerate wrapped optimizers call xm.optimizer_step
                             self.optimizer.step()
-                    elif self.do_grad_scaling:
+                    elif getattr(self, "do_grad_scaling", False):
                         scale_before = self.scaler.get_scale()
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -768,7 +785,7 @@ class LLaVATrainer(Trainer):
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
 
-        if self.do_grad_scaling:
+        if getattr(self, "do_grad_scaling", False):
             self.scaler.scale(loss).backward()
         elif self.use_apex:
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
@@ -837,7 +854,7 @@ class LLaVATrainer(Trainer):
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
 
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+    def _get_train_sampler(self,dataset=None) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
@@ -850,7 +867,7 @@ class LLaVATrainer(Trainer):
                 group_by_modality=True,
             )
         else:
-            return super()._get_train_sampler()
+            return super()._get_train_sampler(dataset)
 
     def create_optimizer(self):
         """
@@ -861,7 +878,7 @@ class LLaVATrainer(Trainer):
         """
         if is_sagemaker_mp_enabled():
             return super().create_optimizer()
-        if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+        if self.sharded_ddp == "simple":
             return super().create_optimizer()
 
         opt_model = self.model
@@ -932,7 +949,7 @@ class LLaVATrainer(Trainer):
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
-            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
+            if self.sharded_ddp == "simple":
                 self.optimizer = OSS(
                     params=optimizer_grouped_parameters,
                     optim=optimizer_cls,
@@ -982,7 +999,7 @@ class LLaVATrainer(Trainer):
                     self.model.named_parameters(), self.args.lora_bias
                 )
                 non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-                    self.model.model.named_parameters()
+                    self.model.named_parameters()
                 )
                 if self.args.local_rank == 0 or self.args.local_rank == -1:
                     self.model.config.save_pretrained(self.args.output_dir)
@@ -996,7 +1013,8 @@ class LLaVATrainer(Trainer):
             
             self.args.output_dir = run_dir
         else:
-            super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
+            print("super(LLaVATrainer, self)._save_checkpoint(model, trial)")
+            super(LLaVATrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):

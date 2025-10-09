@@ -5,7 +5,7 @@ root_dir=/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV # TravelUAV directory
 model_dir=$root_dir/Model/LLaMA-UAV
 
 
-CUDA_VISIBLE_DEVICES=8 python -u $root_dir/src/vlnce_src/eval.py \
+CUDA_VISIBLE_DEVICES=0 python -u $root_dir/src/vlnce_src/eval.py \
     --run_type eval \
     --name TravelLLM \
     --gpu_id 0 \
