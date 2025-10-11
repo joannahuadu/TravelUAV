@@ -11,6 +11,8 @@ import torch
 import numpy as np
 import math
 
+from PIL import Image
+from llamavid import conversation as conversation_lib
 
 sys.path.append(str(Path(str(os.getcwd())).resolve()))
 sys.path.append(str(Path(__file__).resolve().parents[3]/ 'Model' / 'LLaMA-UAV'))
@@ -22,7 +24,7 @@ from llamavid.constants import (
     IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN,
     WAYPOINT_INPUT_TOKEN, WAYPOINT_LABEL_TOKEN, DEFAULT_HISTORY_TOKEN, DEFAULT_WP_TOKEN
 )
-from llamavid import conversation as conversation_lib
+from llamavid.train.train_uav.train_uav_notice import preprocess_multimodal, preprocess
 def load_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
@@ -200,32 +202,6 @@ class CommonArguments:
     model_path: Optional[str] = field(default="facebook/opt-350m")
     model_base: Optional[str] = field(default=None)
 
-def preprocess_multimodal(
-    sources: Sequence[str],
-    data_args: DataArguments,
-    stage = None,
-    delta = None,
-    cur_pos = None
-) -> Dict:
-    """
-        process image token's representation
-    """
-    for source in sources:
-        for sentence in source:
-            if DEFAULT_IMAGE_TOKEN in sentence['value']:
-                sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
-                sentence['prompt'] = copy.deepcopy(sentence['value'])
-                sentence['value'] = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur_pos + '\n\nCurrent image:' + DEFAULT_IMAGE_TOKEN + '\n\nInstruction:' + sentence['value']
-                sentence['value'] = sentence['value'].strip()
-                if "mmtag" in conversation_lib.default_conversation.version:
-                    sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
-            replace_token = DEFAULT_IMAGE_TOKEN
-            if data_args.mm_use_im_start_end:
-                replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
-            sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
-
-    return sources
-
 def rotation_matrix_from_vector(x, y):
     v_x = np.array([x, y, 0])
     v_x = v_x / np.linalg.norm(v_x)
@@ -252,14 +228,16 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
         if 'rgb' in src:
             images.extend(src['rgb'])
             break
-    images = np.stack(images, axis=0)
-    image = processor.preprocess(images, return_tensors='pt')['pixel_values']
+    if processor is not None:
+        images = np.stack(images, axis=0)
+        image = processor.preprocess(images, return_tensors='pt')['pixel_values']
+    else:
+        image = images
     
-    conversation_for_human = '<image>\n' + sources[-1]['instruction']
     conversation = [
     {
         "from": "human",
-        "value": conversation_for_human},
+        "value": sources[-1]['instruction']},
     {
         "from": "gpt",
         "value": ""
@@ -293,20 +271,24 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
     cur_pos = history_waypoint[-1]
     cur_pos = ','.join([str(round(x, 1)) for x in cur_pos])
     # print('stage:', stage,'delta:', delta, 'cur_pos:', cur_pos)
-    sources = preprocess_multimodal(copy.deepcopy([conversation]), data_args, stage=stage, delta=delta, cur_pos=cur_pos)
+    sources = preprocess_multimodal(copy.deepcopy([conversation]), data_args, stage=stage, delta=delta, cur=cur_pos)
+    has_image = (image is not None)
     data_dict = preprocess(
         sources,
+        image,
         tokenizer,
-        has_image=True,
+        has_image=has_image,
         prompt=input_prompt,
         refine_prompt=refine_prompt)
-    if 'prompt' in data_dict:
-        prompt = data_dict['prompt']
-    else:
-        prompt = None
+    
+    prompt = data_dict.get('prompt', None)
         
-    data_dict = dict(input_ids=data_dict["input_ids"][0],
-                        labels=data_dict["labels"][0])
+    if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
+        data_dict = dict(input_ids=data_dict["input_ids"][0],
+                    labels=data_dict["labels"][0])
+    elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
+        data_dict["input_ids"] = data_dict["input_ids"][0]
+        data_dict["labels"] = data_dict["labels"][0]
 
     data_dict['image'] = image
     data_dict['history_waypoint'] = torch.tensor(history_waypoint).view(-1)
@@ -322,249 +304,68 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
 
 
 def inputs_to_batch(tokenizer, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-    # TODO: wmq modify.
-        input_ids, labels = tuple([instance[key] for instance in instances]
-                                  for key in ("input_ids", "labels"))
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
-            batch_first=True,
-            padding_value=tokenizer.pad_token_id)
-        labels = torch.nn.utils.rnn.pad_sequence(labels,
-                                                 batch_first=True,
-                                                 padding_value=IGNORE_INDEX)
-        input_ids = input_ids[:, :tokenizer.model_max_length]
-        labels = labels[:, :tokenizer.model_max_length]
-        batch = dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(tokenizer.pad_token_id),
-        )
-
-        if 'image' in instances[0]:
-            images = [instance['image'] for instance in instances]
-            if all(x is not None and x.shape == images[0].shape for x in images) and len(images) > 1 and images[0].shape[-1] < 100:
-                batch['images'] = torch.stack(images)
-            else:
-                batch['images'] = images
-
-        if 'prompt' in instances[0]:
-            batch['prompts'] = [instance['prompt'] for instance in instances]
+    input_ids, labels = tuple([instance[key] for instance in instances]
+                                for key in ("input_ids", "labels"))
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        input_ids,
+        batch_first=True,
+        padding_value=tokenizer.pad_token_id)
+    labels = torch.nn.utils.rnn.pad_sequence(labels,
+                                                batch_first=True,
+                                                padding_value=IGNORE_INDEX)
+    # attention_mask = None
+    pixel_values = None
+    image_grid_thw = None
+    image_sizes = None
+    # if 'attention_mask' in instances[0].keys():
+    #     attention_mask = tuple([instance['attention_mask'][0] for instance in instances])
+    #     attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask,
+    #                                     batch_first=True,
+    #                                     padding_value=0)
+    
+    if 'pixel_values' in instances[0].keys() and 'image_grid_thw' in instances[0].keys():
+        pixel_values, image_grid_thw =  tuple([instance[key] for instance in instances]
+                                for key in ("pixel_values", "image_grid_thw"))
+    
+        pixel_values = torch.cat(pixel_values, dim=0)
+        image_grid_thw = torch.cat(image_grid_thw, dim=0)
+    if 'pixel_values' in instances[0].keys() and 'image_sizes' in instances[0].keys():
+        pixel_values, image_sizes =  tuple([instance[key] for instance in instances]
+                                for key in ("pixel_values", "image_sizes"))
+    
+        pixel_values = torch.cat(pixel_values, dim=0)
+        image_sizes = torch.cat(image_sizes, dim=0)
         
-        if 'history_waypoint' in instances[0]:
-            batch['historys'] = [instance['history_waypoint'] for instance in instances]
-        
-        if 'orientation' in instances[0]:
-            batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
-
-        return batch
-
-def preprocess(
-    sources: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    prompt: str = None,
-    refine_prompt: bool = False,
-) -> Dict:
-    """
-    Given a list of sources, each is a conversation list. This transform:
-    1. Add signal '### ' at the beginning each sentence, with end signal '\n';
-    2. Concatenate conversations together;
-    3. Tokenize the concatenated conversation;
-    4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
-    """
-    if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-        return preprocess_imgsp_uav(sources, tokenizer, has_image=has_image, refine_prompt=refine_prompt)
-    # add end signal and concatenate together
-    conversations = []
-    for source in sources:
-        header = f"{conversation_lib.default_conversation.system}\n\n"
-        conversation = _add_speaker_and_signal(header, source)
-        conversations.append(conversation)
-    # tokenize conversations
-    def get_tokenize_len(prompts):
-        return [len(tokenizer_image_token(prompt, tokenizer)) for prompt in prompts]
-
-    if has_image:
-        input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
-    else:
-        conversations_tokenized = _tokenize_fn(conversations, tokenizer)
-        input_ids = conversations_tokenized["input_ids"]
-
-    targets = copy.deepcopy(input_ids)
-    for target, source in zip(targets, sources):
-        if has_image:
-            tokenized_lens = get_tokenize_len([header] + [s["value"] for s in source])
-        else:
-            tokenized_lens = _tokenize_fn([header] + [s["value"] for s in source], tokenizer)["input_ids_lens"]
-        speakers = [sentence["from"] for sentence in source]
-        _mask_targets(target, tokenized_lens, speakers)
-
-    return dict(input_ids=input_ids, labels=targets)
-
-def _add_speaker_and_signal(header, source, get_conversation=True):
-    """Add speaker and start/end signal on each round."""
-    BEGIN_SIGNAL = "### "
-    END_SIGNAL = "\n"
-    conversation = header
-    for sentence in source: 
-        from_str = sentence["from"]
-        if from_str.lower() == "human":
-            from_str = conversation_lib.default_conversation.roles[0]
-        elif from_str.lower() == "gpt":
-            from_str = conversation_lib.default_conversation.roles[1]
-        else:
-            from_str = 'unknown'
-        sentence["value"] = (BEGIN_SIGNAL + from_str + ": " +
-                             sentence["value"] + END_SIGNAL)
-        if get_conversation:
-            conversation += sentence["value"]
-    conversation += BEGIN_SIGNAL
-    return conversation
-
-
-def _tokenize_fn(strings: Sequence[str],
-                 tokenizer: transformers.PreTrainedTokenizer) -> Dict:
-    """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ) for text in strings
-    ]
-    input_ids = labels = [
-        tokenized.input_ids[0] for tokenized in tokenized_list
-    ]
-    input_ids_lens = labels_lens = [
-        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item()
-        for tokenized in tokenized_list
-    ]
-    return dict(
+    batch = dict(
         input_ids=input_ids,
         labels=labels,
-        input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
+        pixel_values=pixel_values,
+        image_grid_thw=image_grid_thw,
+        image_sizes=image_sizes,
+        attention_mask=input_ids.ne(tokenizer.pad_token_id),
     )
 
-def _mask_targets(target, tokenized_lens, speakers):
-    cur_idx = tokenized_lens[0]
-    tokenized_lens = tokenized_lens[1:]
-    target[:cur_idx] = IGNORE_INDEX
-    for tokenized_len, speaker in zip(tokenized_lens, speakers):
-        if speaker == "human":
-            target[cur_idx+2:cur_idx + tokenized_len] = IGNORE_INDEX
-        cur_idx += tokenized_len
+    if 'image' in instances[0]:
+        # images = instance['image'] for instance in instances if isinstance(instance['image'], list) else [instance['image'] for instance in instances]
+        images = [
+            img
+            for instance in instances
+            for img in (instance['image'] if isinstance(instance['image'], list) else [instance['image']])
+        ]
+        # TODO: maybe all list is a good thing. wmq: No! all list is not a good thing for arivln iterable dataset
+        if all(isinstance(x, Image.Image) for x in images) or all(isinstance(x, np.ndarray) for x in images):
+            batch['images'] = images
+        elif all(x is not None and x.shape == images[0].shape for x in images):
+            batch['images'] = torch.stack(images)
+        else:
+            batch['images'] = images
 
-def preprocess_imgsp_uav(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    img_token: str = '<image>',
-    refine_prompt: bool = False,
-) -> Dict:
-    conv = conversation_lib.default_conversation.copy()
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+    if 'prompt' in instances[0]:
+        batch['prompts'] = [instance['prompt'] for instance in instances]
+    if 'history_waypoint' in instances[0]:
+        batch['historys'] = [instance['history_waypoint'] for instance in instances]
 
-    # Apply prompt templates
-    conversations = []
-    guided_prompt = []
-    for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
+    if 'orientation' in instances[0]:
+        batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
 
-        conv.messages = []
-        img_in_text = False
-        for j, sentence in enumerate(source):
-            role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
-            
-            # add guided prompt
-            if role==conv.roles[0]:
-                guided_sent = sentence["prompt"].replace(DEFAULT_IMAGE_TOKEN, '').replace('\n', '')
-                if refine_prompt:
-                    # only keep the useful part of the prompt
-                    object_description = guided_sent.split('degrees from you.')[-1].replace('Please control the drone and find the target.', '').strip()
-                    guided_sent = 'Please pay attention to the obstacles in images and approach the object described below: ' + object_description
-
-                guided_prompt.append(guided_sent)
-            # check if image token in text
-            if img_token in sentence["value"]:
-                img_in_text = True
-            # add image token to all sentence if multimoal input
-            if role==conv.roles[0] and img_in_text and img_token not in sentence["value"]:
-                # randomly add image token to the beginning or end of the sentence
-                img_conv = img_token + '\n' + sentence["value"]
-                
-                conv.append_message(role, img_conv)
-            else:
-                conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
-
-    # Tokenize conversations
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
-    else:
-        input_ids = tokenizer(
-            conversations,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ).input_ids
-
-    # add wp embedding, input_ids[-1] is </s>, 
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    
-    targets = input_ids.clone()
-
-    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
-
-    # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
-
-        rounds = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
-
-            parts = rou.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
-
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
-
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-            cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_INDEX
-
-    targets_pad_wp = torch.zeros(targets.shape[0], targets.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = targets[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = targets[:, -1]
-
-    return dict(
-        input_ids=input_ids_pad_wp,
-        labels=targets_pad_wp,
-        prompt=guided_prompt,
-    )
+    return batch

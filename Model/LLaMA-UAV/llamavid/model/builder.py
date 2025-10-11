@@ -23,6 +23,23 @@ from llamavid.model import *
 from llamavid.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from peft import PeftModel
 
+def safe_load_state_dict(model, state_dict):
+    model_dict = model.state_dict()
+    new_state_dict = {}
+
+    for k, v in state_dict.items():
+        if k in model_dict:
+            if model_dict[k].shape == v.shape:
+                new_state_dict[k] = v
+            else:
+                print(f"Skip shape mismatch: {k}, "
+                      f"model {tuple(model_dict[k].shape)} vs weight {tuple(v.shape)}")
+        else:
+            print(f"Skip unexpected key: {k}")
+
+    model_dict.update(new_state_dict)
+    model.load_state_dict(model_dict, strict=False)
+    print(f"Loaded {len(new_state_dict)} compatible parameters out of {len(state_dict)}")
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
     # TODO: wmq modify.
@@ -39,28 +56,39 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             bnb_4bit_quant_type='nf4'
         )
     else:
-        kwargs['torch_dtype'] = torch.float16
+        kwargs['torch_dtype'] = torch.bfloat16
 
     if 'vid' or 'uav' in model_name.lower():
         # Load LLaMA-VID model
         if model_base is not None:
             # this may be mm projector only
             from peft import PeftModel
-            print('Loading LLaVA from base model...')
+            print('Loading Model from base model...')
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
             cfg_pretrained = AutoConfig.from_pretrained(model_path)
-            if "llama" in model_base or 'vicuna' in model_base:
+            if "llava-v1.6" in model_base:
+                ModelClass = LlavaNextUAVForCausalLM
+            elif "llava" in model_base:
+                ModelClass = LlavaUAVForCausalLM
+            elif "Qwen2.5-VL" in model_base:
+                ModelClass = Qwen2_5_VLUAVForCausalLM
+                # kwargs["offload_folder"] = "/home/wmq/.cache"
+                # kwargs["offload_state_dict"] = True
+            elif "llama" in model_base or 'vicuna' in model_base:
                 ModelClass = LlavaLlamaAttForCausalLM
             elif "Qwen" in model_base:
                 ModelClass = LlavaQwenAttForCausalLM
-                # cfg_pretrained._attn_implementation = 'eager'
             else:
-                raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
+                raise ValueError(f"Unknown model type: {model_base}")
             kwargs["ignore_mismatched_sizes"]=True
             model = ModelClass.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
-            model.to(torch.bfloat16)
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
-            model.load_state_dict(mm_projector_weights, strict=False)
+            mm_projector_weights_new = {
+                k.replace("base_model.model.", "", 1): v
+                for k, v in mm_projector_weights.items()
+            }
+            # model.load_state_dict(mm_projector_weights_new, strict=False)
+            safe_load_state_dict(model, mm_projector_weights_new)
         else:
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
             model = LlavaLlamaAttForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
@@ -97,14 +125,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         if mm_use_im_start_end:
             tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
         model.resize_token_embeddings(len(tokenizer))
-
-        vision_tower = model.get_vision_tower()
-        if not vision_tower.is_loaded:
-            vision_tower.load_model()
-        vision_tower.to(device=device, dtype=torch.bfloat16)
-        image_processor = vision_tower.image_processor
+        image_processor = None
         model.config.model_path = model_path
-        model.get_model().initialize_attention_modules(model.config, for_eval=True)
+        if not ("Qwen2.5-VL" in model_base or "llava-v1.6" in  model_base):
+            vision_tower = model.get_vision_tower()
+            if not vision_tower.is_loaded:
+                vision_tower.load_model()
+            vision_tower.to(device=device, dtype=torch.bfloat16)
+            image_processor = vision_tower.image_processor
+            model.get_model().initialize_attention_modules(model.config, for_eval=True)    
 
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
