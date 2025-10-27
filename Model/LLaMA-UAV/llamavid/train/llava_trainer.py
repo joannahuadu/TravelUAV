@@ -132,7 +132,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         # Only save Adapter
         # keys_to_match = ['mm_projector']
         keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att', 'waypoint_emb', 'waypoints_fc', 'waypoints_predictor',
-                         'waypoints_output', 'action_emb', 'actions_fc', 'actions_predictor', 'actions_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger'] # 'end_predictor',
+                         'waypoints_output', 'action_emb', 'actions_fc', 'actions_predictor', 'actions_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger', 'multi_modal_projector'] # 'end_predictor',
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 

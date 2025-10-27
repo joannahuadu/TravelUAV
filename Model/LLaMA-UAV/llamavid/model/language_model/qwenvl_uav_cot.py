@@ -22,10 +22,10 @@ import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
 
 from llamavid.model.language_model.llama_uav import CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
-from llamavid.constants import WAYPOINT_LABEL_TOKEN
+from llamavid.constants import WAYPOINT_LABEL_TOKEN, WAYPOINT_INPUT_TOKEN_QWEN
 
 class QwenConfig(Qwen2_5_VLConfig):
-    model_type = "qwenvl_uav"
+    model_type = "qwenvl_uav_cot"
  
 class CosineDirectionLoss(nn.Module):
     def __init__(self):
@@ -36,7 +36,7 @@ class CosineDirectionLoss(nn.Module):
         loss = 1 - cosine_sim
         return loss.mean()
 
-class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
+class Qwen2_5_VLCOTUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
     _checkpoint_conversion_mapping = {
         "^visual": "model.visual",
         r"^model(?!\.(language_model|visual))": "model.language_model",
@@ -66,6 +66,18 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
         self.angle_loss_func = CosineDirectionLoss()
         self.waypoint_loss_scale = 1.0
         self.special_token_dict = None
+        ## action
+        # self.action_emb = nn.Embedding(1, config.hidden_size)
+        # self.actions_fc = nn.Sequential(
+        #     nn.Linear(config.hidden_size, config.hidden_size // 2),
+        #     nn.ReLU(),
+        #     nn.Linear(config.hidden_size // 2, 64),
+        # )
+        # self.actions_output = nn.Linear(64, 8)
+        
+        # self.actions_loss_func = torch.nn.CrossEntropyLoss()
+        # self.action_loss_scale = 1.0
+        ## bbox
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -82,6 +94,19 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
         
         predicted_waypoints = self.waypoints_output(waypoints_feature)
         return predicted_waypoints
+    
+    # def forward_action(self, hidden_states):
+    #     bs, hidden_size = hidden_states.size()
+    #     actions_feature = self.actions_fc(hidden_states.reshape(-1, hidden_size))
+        
+    #     predicted_actions = self.actions_output(actions_feature)
+    #     return predicted_actions
+    
+    # def forward_bbox(self, hidden_states):
+    #     bs, hidden_size = hidden_states.size()
+    #     ## TODO: wmq bbox regression head.
+    #     predicted_bboxes = 0
+    #     return predicted_bboxes
 
     def forward(
         self,
@@ -103,6 +128,8 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
         second_per_grid_ts: Optional[torch.Tensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         waypoints: Optional[torch.FloatTensor] = None,
+        bboxes: Optional[torch.FloatTensor] = None,
+        actions: Optional[torch.FloatTensor] = None,
         orientations: Optional[torch.FloatTensor] = None,
         historys: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
@@ -190,20 +217,57 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
         hidden_states = outputs[0]
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         predicted_waypoints = self.forward_waypoint(waypoints_feat)
+        # if actions is not None:
+        #     actions_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
+        #     predicted_actions = self.forward_action(actions_feat)
+        # if bboxes is not None:
+        #     bboxes_feat = hidden_states[labels == BBOX_LABEL_TOKEN]
+        #     predicted_bboxes = self.forward_waypoint(bboxes_feat)
         
         if waypoints is None and return_waypoints:
             return predicted_waypoints
         
         loss = None
         
+        logits = self.lm_head(hidden_states)
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # shift_labels = torch.where(
+            #     shift_labels == WAYPOINT_LABEL_TOKEN,
+            #     torch.tensor(-100, device=shift_labels.device, dtype=shift_labels.dtype),
+            #     shift_labels
+            # )
+            mask = (shift_labels == WAYPOINT_LABEL_TOKEN)
+            shift_labels = shift_labels.masked_fill(mask, torch.tensor(WAYPOINT_INPUT_TOKEN_QWEN, device=shift_labels.device, dtype=shift_labels.dtype))
+            mask_shifted = torch.zeros_like(mask)
+            mask_shifted[..., 1:] = mask[..., :-1]
+            shift_labels = shift_labels.masked_fill(mask_shifted, torch.tensor(-100, device=shift_labels.device, dtype=shift_labels.dtype))
+            
+            # assert shift_labels.dtype == torch.long
+            # Flatten the tokens
+            # loss_fct = CrossEntropyLoss()
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+            shift_logits = shift_logits.view(-1, self.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model/pipeline parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+        
         assert len(torch.where(labels == WAYPOINT_LABEL_TOKEN)[0]) == waypoints.shape[0]
         if waypoints is not None:
             if self.use_angle_and_norm_loss:
                 waypoint_loss = self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints[:, 3], waypoints[:, 3])
                 angle_loss = self.waypoint_loss_scale * self.angle_loss_func(predicted_waypoints[:, :3], waypoints[:, :3])
-                loss = waypoint_loss + angle_loss
+                loss += waypoint_loss + angle_loss
             else:
-                loss = self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints, waypoints) 
+                loss += self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints, waypoints) 
+        # if bboxes is not None:
+        #     ## TODO: wmq bboxes regression loss
+        #     pass
+        # if actions is not None:
+        #     loss += self.action_loss_scale * self.actions_loss_func(predicted_actions, actions) 
         
         if return_waypoints:
             return loss, predicted_waypoints
@@ -216,5 +280,5 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
             loss=loss,
         )
 
-AutoConfig.register("qwenvl_uav", QwenConfig)
-AutoModelForCausalLM.register(QwenConfig, Qwen2_5_VLUAVForCausalLM)
+AutoConfig.register("qwenvl_uav_cot", QwenConfig)
+AutoModelForCausalLM.register(QwenConfig, Qwen2_5_VLCOTUAVForCausalLM)
