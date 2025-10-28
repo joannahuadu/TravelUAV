@@ -225,7 +225,8 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
             
         hidden_states = outputs[0]
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
-        predicted_waypoints = self.forward_waypoint(waypoints_feat)
+        if len(waypoints_feat):    
+            predicted_waypoints = self.forward_waypoint(waypoints_feat)
         # if actions is not None:
         #     actions_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         #     predicted_actions = self.forward_action(actions_feat)

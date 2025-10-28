@@ -523,17 +523,18 @@ def preprocess_imgsp_qwen(
     full_result["labels"] = labels
     full_result["input_ids"] = input_ids
 
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    full_result['input_ids'] = input_ids_pad_wp
+    if 'Control' in sources[0][1]['value']:
+        input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+        input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+        input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+        input_ids_pad_wp[:, -1] = input_ids[:, -1]
+        full_result['input_ids'] = input_ids_pad_wp
 
-    targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = labels[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = labels[:, -1]
-    full_result['labels'] = targets_pad_wp
+        targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
+        targets_pad_wp[:, :-2] = labels[:, :-1]
+        targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+        targets_pad_wp[:, -1] = labels[:, -1]
+        full_result['labels'] = targets_pad_wp
 
     full_result['prompt'] = sources
     return full_result
@@ -587,17 +588,18 @@ def preprocess_imgsp_llava(
     full_result["labels"] = labels
     full_result["input_ids"] = input_ids
 
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    full_result['input_ids'] = input_ids_pad_wp
+    if 'Control' in sources[0][1]['value']:
+        input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+        input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+        input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+        input_ids_pad_wp[:, -1] = input_ids[:, -1]
+        full_result['input_ids'] = input_ids_pad_wp
 
-    targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = labels[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = labels[:, -1]
-    full_result['labels'] = targets_pad_wp
+        targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
+        targets_pad_wp[:, :-2] = labels[:, :-1]
+        targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+        targets_pad_wp[:, -1] = labels[:, -1]
+        full_result['labels'] = targets_pad_wp
 
     full_result['prompt'] = sources
     return full_result
