@@ -83,7 +83,7 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def convert_to_qwen25vl_format(bbox, orig_height, orig_width, factor=28, min_pixels=56*56, max_pixels=14*14*4*1280):
+def convert_to_qwen25vl_format(bbox, orig_height, orig_width, factor=28, min_pixels=56*56, max_pixels=14*14*4*128*128):
     new_height, new_width = smart_resize(orig_height, orig_width, factor, min_pixels, max_pixels)
     scale_w = new_width / orig_width
     scale_h = new_height / orig_height
@@ -410,11 +410,11 @@ def preprocess_multimodal(
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
     elif dataset_name == "airvln":
-        prefix = "You are given one drone-view image: <image>\n.\nNavigation goal: "
+        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
     elif dataset_name == "aerialvg":
-        prefix = "You are given one drone-view image: <image>\n.\nNavigation goal: "
+        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
         suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
     else:
         raise ValueError(
@@ -675,21 +675,33 @@ class LazySupervisedDataset(Dataset):
         ori_sources = None
         infos = self.list_data_dict[i]
         dataset_name = infos['dataset']
-        traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
-        json_path = os.path.join(self.dataset_path, infos['json'])
         frame_num = infos['frame']
         bbox = infos['bbox']
         subgoal = infos['subgoal']
         states = self.dataset_state[dataset_name]
-            
-        with open(json_path, 'r') as f:
-            sources = json.load(f)
+        if dataset_name == 'traveluav':
+            traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
+            json_path = os.path.join(self.dataset_path, infos['json'])
+            with open(json_path, 'r') as f:
+                sources = json.load(f)
 
-        if isinstance(i, int):
-            sources = [sources]
-        ori_sources = copy.deepcopy(sources)
+            if isinstance(i, int):
+                sources = [sources]
+            ori_sources = copy.deepcopy(sources)
             
-        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+            assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+            height = 256
+            width = 256
+        elif dataset_name == 'aerialvg':
+            image_path = infos['json']
+            height = infos['height']
+            width = infos['width']
+            sources = [{"conversations": [{"from": "human", "value": infos['conversations']}, {"from": "gpt", "value": ""}]}]
+            ori_sources = copy.deepcopy(sources)
+        else:
+            raise ValueError(
+                f"Unsupported dataset name: {dataset_name}"
+            )
         
         assist = ""
         if subgoal != "":
@@ -699,43 +711,43 @@ class LazySupervisedDataset(Dataset):
                 if state in bbox:
                     if state == "front":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
                     elif state == "left":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
                     elif state == "right":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
                     elif state == "rear":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
                     elif state == "down":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
                     elif state == "current":
                         if self.data_args.bbox_scale:
-                            bbox_formatted = [round(float(v) * 256) for v in bbox[state]]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, 256, 256)
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
@@ -762,9 +774,7 @@ class LazySupervisedDataset(Dataset):
                     traj_imgs.append(images)
                 image = traj_imgs[(frame_num-1):frame_num][0]
             else:
-                traj_camera_list = sorted([os.path.join(traj_dir, filename) for filename in os.listdir(traj_dir)])
-                images = [Image.open(img_path).convert('RGB') for img_path in traj_camera_list]
-                image = images[(frame_num-1):frame_num][0]
+                image = [Image.open(image_path).convert('RGB')]
         else:
             raise ValueError(
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
@@ -791,6 +801,8 @@ class LazySupervisedDataset(Dataset):
             data_dict["labels"] = data_dict["labels"][0]
         
         data_dict['image'] = image
+        if dataset_name == "aerialvg":
+            return data_dict
         trajectory_data = np.array(ori_sources[0]['trajectory'])
         history_waypoint = trajectory_data[0:frame_num, 0:3]
         waypoint = trajectory_data[frame_num:min(ori_sources[0]['length'], frame_num + 7), 0:3]

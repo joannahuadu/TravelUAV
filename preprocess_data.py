@@ -4,9 +4,9 @@ from pathlib import Path
 import os
 
 # ======= 配置输入/输出路径 =======
-jsonl_path = Path("/home/fit/qiuhan/WORK/wmq/Visual-CoT/jobs/1009/traveluav_cot_train.jsonl")  # 第一个：jsonl，每行一个样本
+jsonl_path = Path("/home/fit/qiuhan/WORK/wmq/Visual-CoT/jobs/1027/traveluav_cot_train_20.jsonl")  # 第一个：jsonl，每行一个样本
 pairs_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/uav_dataset/trainset.json")   # 第二个：json 列表，每个元素含 {"json": "...", "frame": N}
-out_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/cot_uav_dataset/traveluav_trainset.json")  # 输出：json 列表
+out_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/cot_uav_dataset/traveluav_trainset_1027.json")  # 输出：json 列表
 
 # ======= 工具函数 =======
 SUBGOAL_RE = re.compile(r"Subgoal:\s*(.+?)(?:[。\.]\s*|$)", flags=re.IGNORECASE | re.DOTALL)

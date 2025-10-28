@@ -151,11 +151,12 @@ class Qwen2_5_VLCOTUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
                 labels = labels.to(device=self.device)
         history_embeds = []
         
-        for idx in range(len(historys)):
-            history = historys[idx]
-            info = history.view(-1, 3)
-            history_embed = self.history_preprocessor(info)
-            history_embeds.append(history_embed)
+        if historys is not None:
+            for idx in range(len(historys)):
+                history = historys[idx]
+                info = history.view(-1, 3)
+                history_embed = self.history_preprocessor(info)
+                history_embeds.append(history_embed)
 
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -255,8 +256,8 @@ class Qwen2_5_VLCOTUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
         
-        assert len(torch.where(labels == WAYPOINT_LABEL_TOKEN)[0]) == waypoints.shape[0]
         if waypoints is not None:
+            assert len(torch.where(labels == WAYPOINT_LABEL_TOKEN)[0]) == waypoints.shape[0]
             if self.use_angle_and_norm_loss:
                 waypoint_loss = self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints[:, 3], waypoints[:, 3])
                 angle_loss = self.waypoint_loss_scale * self.angle_loss_func(predicted_waypoints[:, :3], waypoints[:, :3])
