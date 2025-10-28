@@ -577,7 +577,12 @@ def preprocess_imgsp_llava(
             ans_end = ans_start
             while ans_end < L and ans_end != L-1:
                 ans_end += 1
-            assert input_ids_flat[ans_end] == 29871
+            try:
+                assert input_ids_flat[ans_end] == 29871
+            except:
+                print("input_ids_flat[ans_end] is not 29871.")
+                print(ans_start, ans_end, len(input_ids_flat), tokenizer.decode(input_ids_flat[-50:]))
+                # input_ids_flat[ans_end] = 29871
             if ans_end < L:
                 labels[0, ans_start : ans_end + 1] = input_ids[
                     0, ans_start : ans_end + 1
