@@ -333,7 +333,7 @@ class AirVLNSimulatorClientTool:
                     recent_loc = position
                     history_loc = pos_queue.popleft()
                     delta_distance = np.linalg.norm(history_loc -recent_loc)
-                    if delta_distance < 0.1:
+                    if delta_distance < 0.01:
                         print('move on path api: stuck max len')
                         collision = True
                         break

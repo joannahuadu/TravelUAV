@@ -65,12 +65,12 @@ class Assist:
                 collision_type = 'tiny diff'
             elif close_collision:
                 collision_type = 'close'
-            elif distance < 0.1:
+            elif distance < 0.01:
                 collision_type = 'distance'
             
             if collision_type is not None:
                 print('collision type: ', collision_type)
-            collisions[i] = np.all(diff < 3) or close_collision or distance < 0.1
+            collisions[i] = np.all(diffs < 3) or close_collision or distance < 0.01
             if collisions[i] and not dones[i]:
                 dones[i] = True
         return collisions, dones
@@ -82,7 +82,7 @@ class Assist:
             depth_result = []
             for cid, camera_name in enumerate(RGB_FOLDER):       
                 img_src = episodes[i][-1]['depth'][cid]
-                img_src = np.array(img_src[64:192, 64:192])
+                img_src = np.array(img_src)
                 depth = min(min(row) for row in img_src) / 2.55
                 depth_result.append(depth)
                 if 'down' in camera_name and depth < 7:
@@ -134,7 +134,7 @@ class Assist:
                     elif cur_vec[2] < 0:
                         if self.always_help:
                             self.depth_detection(episodes)
-                        if self.depth_results[i][-1] < 7:
+                        if self.depth_results[i][-1] < 7 or self.depth_results[i][0] < 10 or (self.depth_results[i][1] < 7 and self.depth_results[i][2] < 7):
                             state = 'take off' 
                         else:
                             pre_vec = pre_vec[0:2] 
@@ -148,6 +148,25 @@ class Assist:
                     elif cur_vec[2] > 7 or distance_to_end < 10:
                         state = 'landing'
                     else:
+                        if self.always_help:
+                            self.depth_detection(episodes)
+                        if self.depth_results[i][-1] < 7 or self.depth_results[i][0] < 10 or (self.depth_results[i][1] < 7 and self.depth_results[i][2] < 7):
+                            state = 'take off' 
+                        else:
+                            pre_vec = pre_vec[0:2] 
+                            cur_vec = cur_vec[0:2]
+                            delta_angle = np.arccos(np.dot(pre_vec, cur_vec) / (np.linalg.norm(pre_vec) + 1e-6) / (np.linalg.norm(cur_vec) + 1e-6)) * 180 / np.pi
+                            if delta_angle > 20:
+                                if int(np.cross(pre_vec, cur_vec)) > 0:
+                                    state = 'right'
+                                else:
+                                    state = 'left'  
+                else:
+                    if self.always_help:
+                        self.depth_detection(episodes)
+                    if self.depth_results[i][-1] < 7 or self.depth_results[i][0] < 10 or (self.depth_results[i][1] < 7 and self.depth_results[i][2] < 7):
+                        state = 'take off' 
+                    else:
                         pre_vec = pre_vec[0:2] 
                         cur_vec = cur_vec[0:2]
                         delta_angle = np.arccos(np.dot(pre_vec, cur_vec) / (np.linalg.norm(pre_vec) + 1e-6) / (np.linalg.norm(cur_vec) + 1e-6)) * 180 / np.pi
@@ -155,16 +174,7 @@ class Assist:
                             if int(np.cross(pre_vec, cur_vec)) > 0:
                                 state = 'right'
                             else:
-                                state = 'left'  
-                else:
-                    pre_vec = pre_vec[0:2] 
-                    cur_vec = cur_vec[0:2]
-                    delta_angle = np.arccos(np.dot(pre_vec, cur_vec) / (np.linalg.norm(pre_vec) + 1e-6) / (np.linalg.norm(cur_vec) + 1e-6)) * 180 / np.pi
-                    if delta_angle > 20:
-                        if int(np.cross(pre_vec, cur_vec)) > 0:
-                            state = 'right'
-                        else:
-                            state = 'left'
+                                state = 'left'
                 assist_notices[i] = state
         except Exception as e:
             import pdb; pdb.set_trace()

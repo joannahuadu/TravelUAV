@@ -81,7 +81,8 @@ class AirVLNENV:
                  eval_json_path=None,
                  seed=1,
                  dataset_group_by_scene=True,
-                 activate_maps=[]
+                 activate_maps=[],
+                 eval_split=-1,
                  ):
         self.batch_size = batch_size
         self.dataset_path = dataset_path
@@ -92,6 +93,7 @@ class AirVLNENV:
         self.activate_maps = set(activate_maps)
         self.map_area_dict = prepare_object_map()
         self.exist_save_path = save_path
+        self.eval_split = eval_split
         load_data = self.load_my_datasets()
         self.ori_raw_data = load_data
         logger.info('Loaded dataset {}.'.format(len(self.eval_json_path)))
@@ -123,6 +125,12 @@ class AirVLNENV:
             skipped_trajectory_set.add(item)
         print('Loading dataset metainfo...')
         trajectorys_path = sorted(trajectorys_path)
+        if self.eval_split != -1:
+            s = len(trajectorys_path) // 5
+            start = s * self.eval_split
+            end = start + s if self.eval_split != 4 else len(trajectorys_path) 
+            print(f"SPLITTING DATASET{self.eval_split}: {start}-{end}")
+            trajectorys_path = trajectorys_path[start: end]
         for merged_json in tqdm.tqdm(trajectorys_path):
             merged_json = merged_json.replace('data6', 'data5') # it is a fix since the mark.json saved on data5
             path_parts = merged_json.strip('/').split('/')
