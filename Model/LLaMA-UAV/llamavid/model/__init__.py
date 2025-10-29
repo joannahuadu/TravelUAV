@@ -3,3 +3,5 @@ from .language_model.llava_qwen_uav import LlavaQwenAttForCausalLM
 from .language_model.llava_uav import LlavaUAVForCausalLM
 from .language_model.qwenvl_uav import Qwen2_5_VLUAVForCausalLM
 from .language_model.llavanext_uav import LlavaNextUAVForCausalLM
+from .language_model.qwenvl_uav_cot import Qwen2_5_VLCOTUAVForCausalLM
+from .language_model.llavanext_uav_cot import LlavaNextCOTUAVForCausalLM

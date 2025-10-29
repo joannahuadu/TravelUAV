@@ -130,7 +130,7 @@ class LlavaNextUAVForCausalLM(LlavaNextForConditionalGeneration):
                 input_ids = input_ids.to(device=self.device)
             if attention_mask.device != self.device:
                 attention_mask = attention_mask.to(device=self.device)
-            if labels.device != self.device:
+            if labels and labels.device != self.device:
                 labels = labels.to(device=self.device)
         history_embeds = []
         

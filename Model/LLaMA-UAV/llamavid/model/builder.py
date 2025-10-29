@@ -41,7 +41,7 @@ def safe_load_state_dict(model, state_dict):
     model.load_state_dict(model_dict, strict=False)
     print(f"Loaded {len(new_state_dict)} compatible parameters out of {len(state_dict)}")
 
-def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
+def load_pretrained_model(model_path, model_base, model_name, args, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
     # TODO: wmq modify.
     kwargs = {"device_map": device_map}
 
@@ -58,7 +58,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         kwargs['torch_dtype'] = torch.bfloat16
 
-    if 'vid' or 'uav' in model_name.lower():
+    if 'vid' or 'uav' or 'cot' in model_name.lower():
         # Load LLaMA-VID model
         if model_base is not None:
             # this may be mm projector only
@@ -67,11 +67,17 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
             cfg_pretrained = AutoConfig.from_pretrained(model_path)
             if "llava-v1.6" in model_base:
-                ModelClass = LlavaNextUAVForCausalLM
+                if args.cot:
+                    ModelClass = LlavaNextCOTUAVForCausalLM
+                else:
+                    ModelClass = LlavaNextUAVForCausalLM
             elif "llava" in model_base:
                 ModelClass = LlavaUAVForCausalLM
             elif "Qwen2.5-VL" in model_base:
-                ModelClass = Qwen2_5_VLUAVForCausalLM
+                if args.cot:
+                    ModelClass = Qwen2_5_VLCOTUAVForCausalLM
+                else:
+                    ModelClass = Qwen2_5_VLUAVForCausalLM
                 # kwargs["offload_folder"] = "/home/wmq/.cache"
                 # kwargs["offload_state_dict"] = True
             elif "llama" in model_base or 'vicuna' in model_base:

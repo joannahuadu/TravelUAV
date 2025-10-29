@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List, Union
+from typing import Dict, Optional, Sequence, List, Union, Any
 import pickle
 import math
 import time
@@ -49,10 +49,57 @@ from decord import VideoReader, cpu
 
 from transformers.utils import logging
 from transformers import AutoProcessor
+import re
 logger = logging.get_logger(__name__)
 
 local_rank = None
 
+
+# This is the resize function of Qwen2.5-VL
+def smart_resize(
+    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+):
+    """Rescales the image so that the following conditions are met:
+    1. Both dimensions (height and width) are divisible by 'factor'.
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+    3. The aspect ratio of the image is maintained as closely as possible.
+    """
+    if height < factor or width < factor:
+        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+    elif max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = math.floor(height / beta / factor) * factor
+        w_bar = math.floor(width / beta / factor) * factor
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return h_bar, w_bar
+
+
+def convert_to_qwen25vl_format(bbox, orig_height, orig_width, factor=28, min_pixels=56*56, max_pixels=14*14*4*128*128):
+    new_height, new_width = smart_resize(orig_height, orig_width, factor, min_pixels, max_pixels)
+    scale_w = new_width / orig_width
+    scale_h = new_height / orig_height
+    
+    x1, y1, x2, y2 = bbox
+    x1_new = round(x1 * scale_w)
+    y1_new = round(y1 * scale_h)
+    x2_new = round(x2 * scale_w)
+    y2_new = round(y2 * scale_h)
+    
+    x1_new = max(0, min(x1_new, new_width - 1))
+    y1_new = max(0, min(y1_new, new_height - 1))
+    x2_new = max(0, min(x2_new, new_width - 1))
+    y2_new = max(0, min(y2_new, new_height - 1))
+    
+    return [x1_new, y1_new, x2_new, y2_new]
 
 def rank0_print(*args):
     if local_rank == 0:
@@ -99,12 +146,19 @@ class ModelArguments:
     pretrain_qformer: Optional[str] = field(default=None)
     compress_type: Optional[str] = field(default=None)
     use_angle_and_norm_loss: bool = field(default=True)
+    cot: bool = field(default=False)
 
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default=None,
-                           metadata={"help": "Path to the training data json."})
+    # data_path: str = field(default=None,
+    #                        metadata={"help": "Path to the training data json."})
+    data_path: List[str] = field(default_factory=list,
+        metadata={
+            "help": "Path(s) to one or multiple training data json files.",
+            "nargs": "+"
+        }
+    )
     dataset_path: str = field(default=None,
                            metadata={"help": "Path to the raw data."})
     lazy_preprocess: bool = False
@@ -117,6 +171,13 @@ class DataArguments:
     image_grid_pinpoints: Optional[str] = field(default=None)
     input_prompt: Optional[str] = field(default=None)
     refine_prompt: Optional[bool] = field(default=True)
+    dataset_state: Optional[Dict[str, List[str]]] = field(default_factory=
+        lambda: {
+            "traveluav": ['front', 'left', 'right', 'rear', 'down'],
+            "arivln": ['current'],
+            "aerialvg": ['current']
+        })
+    bbox_scale: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -253,7 +314,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         # Only save Adapter
         # keys_to_match = ['mm_projector']
         keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att', 'waypoint_emb', 'waypoints_fc', 'waypoints_predictor',
-                         'waypoints_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger'] # 'end_predictor',
+                         'waypoints_output', 'history_predictor', 'history_preprocessor', 'is_help_predictor', 'embed_tokens', 'lm_head', 'visual.merger', 'multi_modal_projector'] # 'end_predictor',
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 
@@ -335,72 +396,12 @@ def smarter_tokenizer_and_embedding_resize(
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
-
-def _tokenize_fn(strings: Sequence[str],
-                 tokenizer: transformers.PreTrainedTokenizer) -> Dict:
-    """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ) for text in strings
-    ]
-    input_ids = labels = [
-        tokenized.input_ids[0] for tokenized in tokenized_list
-    ]
-    input_ids_lens = labels_lens = [
-        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item()
-        for tokenized in tokenized_list
-    ]
-    return dict(
-        input_ids=input_ids,
-        labels=labels,
-        input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
-    )
-
-
-def _mask_targets(target, tokenized_lens, speakers):
-    # cur_idx = 0
-    cur_idx = tokenized_lens[0]
-    tokenized_lens = tokenized_lens[1:]
-    target[:cur_idx] = IGNORE_INDEX
-    for tokenized_len, speaker in zip(tokenized_lens, speakers):
-        if speaker == "human":
-            target[cur_idx+2:cur_idx + tokenized_len] = IGNORE_INDEX
-        cur_idx += tokenized_len
-
-
-def _add_speaker_and_signal(header, source, get_conversation=True):
-    """Add speaker and start/end signal on each round."""
-    BEGIN_SIGNAL = "### "
-    END_SIGNAL = "\n"
-    conversation = header
-    for sentence in source:
-        from_str = sentence["from"]
-        if from_str.lower() == "human":
-            from_str = conversation_lib.default_conversation.roles[0]
-        elif from_str.lower() == "gpt":
-            from_str = conversation_lib.default_conversation.roles[1]
-        else:
-            from_str = 'unknown'
-        sentence["value"] = (BEGIN_SIGNAL + from_str + ": " +
-                             sentence["value"] + END_SIGNAL)
-        if get_conversation:
-            conversation += sentence["value"]
-    conversation += BEGIN_SIGNAL
-    return conversation
-
-
 def preprocess_multimodal(
     sources: Sequence[str],
     data_args: DataArguments,
-    stage = None,
-    delta = None,
-    cur = None
+    assist: str,
+    dataset_name: str,
+    eval: bool = False,
 ) -> Dict:
     """
         process image token's representation
@@ -408,165 +409,89 @@ def preprocess_multimodal(
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
         return sources
-
-    if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-        for source in sources:
-            for sentence in source:
-                if DEFAULT_IMAGE_TOKEN in sentence['value']:
-                    sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
-                    sentence['prompt'] = copy.deepcopy(sentence['value'])
-                    sentence['value'] = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + '\n\nCurrent image:' + DEFAULT_IMAGE_TOKEN + '\n\nInstruction:' + sentence['value']
-                    sentence['value'] = sentence['value'].strip()
-                    if "mmtag" in conversation_lib.default_conversation.version:
-                        sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
-                replace_token = DEFAULT_IMAGE_TOKEN
-                if data_args.mm_use_im_start_end:
-                    replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
-                sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
-    elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
-        # TODO: wmq qwen2.5vl traveluav
-        sources = [sources[0][0]['value']]
-        for i, sentence in enumerate(sources):
-            sentence = sentence.replace(DEFAULT_IMAGE_TOKEN, '').strip()
-            sources[i] = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + '\n\nInstruction:These five images respectively come from five perspectives: front, left, right, rear, down. ' + sentence
     
-    return sources
-
-
-def preprocess_multimodal_movie(
-    sources: Sequence[str],
-    data_args: DataArguments,
-    video_inputs: str
-) -> Dict:
-    is_multimodal = data_args.is_multimodal
-    if not is_multimodal:
-        return sources
-
+    prefix = "Navigation goal: "
+    suffix = "\n"
+    if dataset_name == "traveluav":
+        prefix = "You are given five drone-view images from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown.\nNavigation goal: "
+        if "Subgoal" in assist:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
+        if eval:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target. ASSISTANT: Subgoal:"
+    elif dataset_name == "airvln":
+        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
+        if "Subgoal" in assist:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
+    elif dataset_name == "aerialvg":
+        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
+        if not eval:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
+        else:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). ASSISTANT: Subgoal:"
+    else:
+        raise ValueError(
+                f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
+        )
+        
     for source in sources:
         for sentence in source:
             if DEFAULT_IMAGE_TOKEN in sentence['value']:
-                prompt = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
-            replace_token = video_inputs
+                sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
+                sentence['prompt'] = copy.deepcopy(sentence['value'])
+                sentence['value'] = prefix + sentence['value'] + suffix
+                sentence['value'] = sentence['value'].strip()
+                if "mmtag" in conversation_lib.default_conversation.version:
+                    sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
+            # replace_token = DEFAULT_IMAGE_TOKEN
             if data_args.mm_use_im_start_end:
                 replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
-            sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
-
-    return sources, prompt
-
-
-def preprocess_imgsp_v1(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    img_token: str = '<image>',
-    refine_prompt: bool = False,
-) -> Dict:
-    conv = conversation_lib.default_conversation.copy()
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-
-    # Apply prompt templates
-    conversations = []
-    guided_prompt = []
-    for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
-
-        conv.messages = []
-        img_in_text = False
-        for j, sentence in enumerate(source):
-            role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
+            # sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
             
-            # add guided prompt
-            if role==conv.roles[0]:
-                guided_sent = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, '').replace('\n', '')
-                if refine_prompt:
-                    # only keep the useful part of the prompt
-                    if '\n' in guided_sent:
-                        for _sent in guided_sent.split('\n'):
-                            if '?' in _sent:
-                                guided_sent = _sent
-                                break
-                guided_prompt.append(guided_sent)
-            # check if image token in text
-            if img_token in sentence["value"]:
-                img_in_text = True
-            # add image token to all sentence if multimoal input
-            if role==conv.roles[0] and img_in_text and img_token not in sentence["value"]:
-                # randomly add image token to the beginning or end of the sentence
-                if random.randint(0,1)==0:
-                    img_conv = img_token + '\n' + sentence["value"]
-                else:
-                    img_conv = sentence["value"] + '\n' + img_token
-                
-                conv.append_message(role, img_conv)
-            else:
-                conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
+            if sentence['from'] == "gpt":
+                sentence["value"] = assist
 
-    # Tokenize conversations
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
-    else:
-        input_ids = tokenizer(
-            conversations,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ).input_ids
+    return sources
 
-    targets = input_ids.clone()
+def _build_messages(item: Sequence[str], images: Union[List[str], str], system_message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if isinstance(images, str):
+        images = [images]
 
-    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+    image_pool = [
+        {"type": "image", "image": img} for img in images
+    ]
+    
+    messages = [system_message]
+    for turn in item:
+        role = "user" if turn["from"] == "human" else "assistant"
+        text: str = turn["value"]
 
-    # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        if role == "user":
+            content = []
+            text_parts = re.split(r"(<image>|<video>)", text)
 
-        rounds = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
+            for seg in text_parts:
+                if seg == "<image>":
+                    if not image_pool:
+                        raise ValueError(
+                            "Number of <image> placeholders exceeds the number of provided images"
+                        )
+                    content.append(image_pool.pop(0))
+                elif seg.strip():
+                    content.append({"type": "text", "text": seg.strip()})
 
-            parts = rou.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
+            messages.append({"role": role, "content": content})
+        else:
+            messages.append({"role": role, "content": [{"type": "text", "text": text}]})
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+    if image_pool:
+        raise ValueError(
+            f"{len(image_pool)} image(s) remain unused (not consumed by placeholders)"
+        )
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-            cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_INDEX
-                logger.warning(
-                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                    f" (ignored)"
-                )
-
-    return dict(
-        input_ids=input_ids,
-        labels=targets,
-        prompt=guided_prompt,
-    )
-
+    return messages
 
 def preprocess_imgsp_qwen(
-    sources,
+    sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
     has_image: List[Image.Image],
     img_token: str = '<image>',
@@ -579,161 +504,60 @@ def preprocess_imgsp_qwen(
             {"type": "text", "text": "You are a helpful assistant. The assistant is a navigation model that output the uav waypoints according to the user's instructions and images."}
         ]
     }
-    text = []
-    for i, sentence in enumerate(sources):
-        user_content = []
-        for _ in range(len(has_image)):
-            user_content.append({"type": "image"})
-        user_content.append({"type": "text", "text": sentence})
-        messages = [
-            system_message, 
-            {"role": "user", "content": user_content},
-        ]
-        text.append(processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
-    
-    input = processor(text=text, images=has_image, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length)
-    input_ids = input.input_ids
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    input['input_ids'] = input_ids_pad_wp
-    
-    targets = input_ids.clone()
-    targets[:, :] = IGNORE_INDEX
+    messages = _build_messages(sources[0], has_image, system_message)
 
-    targets_pad_wp = torch.zeros(targets.shape[0], targets.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = targets[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = targets[:, -1]
-
-    return dict(
-        **input,
-        labels=targets_pad_wp,
-        prompt=sources, #list len=1
+    full_result = processor.apply_chat_template(
+        messages, tokenize=True, return_dict=True, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length
     )
 
-def preprocess_imgsp_uav(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    img_token: str = '<image>',
-    refine_prompt: bool = False,
-) -> Dict:
-    conv = conversation_lib.default_conversation.copy()
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+    input_ids = full_result["input_ids"]
+    if isinstance(input_ids, list):
+        input_ids = torch.tensor(input_ids).unsqueeze(0)
 
-    # Apply prompt templates
-    conversations = []
-    guided_prompt = []
-    for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
+    labels = torch.full_like(input_ids, IGNORE_INDEX)
 
-        conv.messages = []
-        img_in_text = False
-        for j, sentence in enumerate(source):
-            role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
-            
-            # add guided prompt
-            if role==conv.roles[0]:
-                guided_sent = sentence["prompt"].replace(DEFAULT_IMAGE_TOKEN, '').replace('\n', '')
-                if refine_prompt:
-                    # only keep the useful part of the prompt
-                    object_description = guided_sent.split('degrees from you.')[-1].replace('Please control the drone and find the target.', '').strip()
-                    guided_sent = 'Please pay attention to the obstacles in images and approach the object described below: ' + object_description
+    input_ids_flat = input_ids[0].tolist()
+    L = len(input_ids_flat)
+    pos = 0
+    while pos < L:
+        if input_ids_flat[pos] == 77091:
+            ans_start = pos + 2
+            ans_end = ans_start
+            while ans_end < L and input_ids_flat[ans_end] != 151645:
+                ans_end += 1
+            if ans_end < L:
+                labels[0, ans_start : ans_end + 2] = input_ids[
+                    0, ans_start : ans_end + 2
+                ]
+                pos = ans_end
+        pos += 1
 
-                guided_prompt.append(guided_sent)
-            # check if image token in text
-            if img_token in sentence["value"]:
-                img_in_text = True
-            # add image token to all sentence if multimoal input
-            if role==conv.roles[0] and img_in_text and img_token not in sentence["value"]:
-                # randomly add image token to the beginning or end of the sentence
-                img_conv = img_token + '\n' + sentence["value"]
-                
-                conv.append_message(role, img_conv)
-            else:
-                conv.append_message(role, sentence["value"])
-        conversations.append(conv.get_prompt())
+    full_result["labels"] = labels
+    full_result["input_ids"] = input_ids
 
-    # Tokenize conversations
-    if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
-    else:
-        input_ids = tokenizer(
-            conversations,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        ).input_ids
-    input_ids = input_ids[:, :tokenizer.model_max_length]
-    # add wp embedding, input_ids[-1] is </s>, 
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    
-    targets = input_ids.clone()
+    if 'Control' in sources[0][1]['value']:
+        input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+        input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+        input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+        input_ids_pad_wp[:, -1] = input_ids[:, -1]
+        full_result['input_ids'] = input_ids_pad_wp
 
-    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+        targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
+        targets_pad_wp[:, :-2] = labels[:, :-1]
+        targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+        targets_pad_wp[:, -1] = labels[:, -1]
+        full_result['labels'] = targets_pad_wp
 
-    # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
-
-        rounds = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
-
-            parts = rou.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
-
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
-
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-            cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_INDEX
-
-    targets = targets[:, :tokenizer.model_max_length]
-    # add wp embedding, input_ids[-1] is </s>
-    targets_pad_wp = torch.zeros(targets.shape[0], targets.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = targets[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = targets[:, -1]
-    
-    # print(input_ids_pad_wp)
-    return dict(
-        input_ids=input_ids_pad_wp,
-        labels=targets_pad_wp,
-        prompt=guided_prompt,
-    )
+    full_result['prompt'] = sources
+    return full_result
 
 def preprocess_imgsp_llava(
-    sources,
+    sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
     has_image: List[Image.Image],
     img_token: str = '<image>',
     refine_prompt: bool = False,
+    eval: bool = False,
 ) -> Dict:
     processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
     system_message = {
@@ -742,39 +566,68 @@ def preprocess_imgsp_llava(
             {"type": "text", "text": "A chat between a curious user and an artificial intelligence assistant. The assistant is a navigation model that output the uav waypoints or actions according to the user's instructions and images."}
         ]
     }
-    text = []
-    for i, sentence in enumerate(sources):
-        user_content = []
-        for _ in range(len(has_image)):
-            user_content.append({"type": "image"})
-        user_content.append({"type": "text", "text": sentence})
-        messages = [
-            system_message, 
-            {"role": "user", "content": user_content},
-        ]
-        text.append(processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
-    
-    input = processor(text=text, images=has_image, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length)
-    input_ids = input.input_ids
-    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
-    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
-    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
-    input_ids_pad_wp[:, -1] = input_ids[:, -1]
-    input['input_ids'] = input_ids_pad_wp
-    
-    targets = input_ids.clone()
-    targets[:, :] = IGNORE_INDEX
-
-    targets_pad_wp = torch.zeros(targets.shape[0], targets.shape[1] + 1, dtype=torch.long)
-    targets_pad_wp[:, :-2] = targets[:, :-1]
-    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
-    targets_pad_wp[:, -1] = targets[:, -1]
-
-    return dict(
-        **input,
-        labels=targets_pad_wp,
-        prompt=sources, #list len=1
+    messages = _build_messages(sources[0], has_image, system_message)
+    if eval:
+        messages = [m for m in messages if m["role"] in ("system", "user")]
+    full_result = processor.apply_chat_template(
+        messages, tokenize=True, return_dict=True, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length
     )
+
+    input_ids = full_result["input_ids"]
+    if isinstance(input_ids, list):
+        input_ids = torch.tensor(input_ids).unsqueeze(0)
+
+    if eval:
+        full_result["labels"] = None
+        full_result["input_ids"] = input_ids
+        full_result['prompt'] = sources
+        return full_result
+
+    labels = torch.full_like(input_ids, IGNORE_INDEX)
+
+    input_ids_flat = input_ids[0].tolist()
+    L = len(input_ids_flat)
+    pos = 0
+    while pos < L:
+        #ASSISANT
+        if input_ids_flat[pos] == 13566 and input_ids_flat[pos-1] == 9047 and input_ids_flat[pos-2] == 1799 and input_ids_flat[pos-3] == 319:
+            ans_start = pos + 2
+            if input_ids_flat[ans_start] == 29871:
+                ans_start = ans_start + 1
+            ans_end = ans_start
+            while ans_end < L and ans_end != L-1:
+                ans_end += 1
+            try:
+                assert input_ids_flat[ans_end] == 29871
+            except:
+                print("input_ids_flat[ans_end] is not 29871.")
+                print(ans_start, ans_end, len(input_ids_flat), tokenizer.decode(input_ids_flat[-50:]))
+                # input_ids_flat[ans_end] = 29871
+            if ans_end < L:
+                labels[0, ans_start : ans_end + 1] = input_ids[
+                    0, ans_start : ans_end + 1
+                ]
+                pos = ans_end
+        pos += 1
+
+    full_result["labels"] = labels
+    full_result["input_ids"] = input_ids
+
+    if 'Control' in sources[0][1]['value']:
+        input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+        input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+        input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+        input_ids_pad_wp[:, -1] = input_ids[:, -1]
+        full_result['input_ids'] = input_ids_pad_wp
+
+        targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
+        targets_pad_wp[:, :-2] = labels[:, :-1]
+        targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+        targets_pad_wp[:, -1] = labels[:, -1]
+        full_result['labels'] = targets_pad_wp
+
+    full_result['prompt'] = sources
+    return full_result
 
 
 def preprocess(
@@ -784,6 +637,7 @@ def preprocess(
     has_image: bool = False,
     prompt: str = None,
     refine_prompt: bool = False,
+    eval: bool = False,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -792,57 +646,39 @@ def preprocess(
     3. Tokenize the concatenated conversation;
     4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
     """
-    if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-        return preprocess_imgsp_uav(sources, tokenizer, has_image=has_image, refine_prompt=refine_prompt)
-    elif conversation_lib.default_conversation.version.startswith("imgsp_qwen"):
+    if conversation_lib.default_conversation.version.startswith("imgsp_qwen"):
         return preprocess_imgsp_qwen(sources, tokenizer, has_image=images, refine_prompt=refine_prompt)
     elif conversation_lib.default_conversation.version.startswith("imgsp_llava"):
-        return preprocess_imgsp_llava(sources, tokenizer, has_image=images, refine_prompt=refine_prompt)
-    elif conversation_lib.default_conversation.version.startswith("imgsp"):
-        return preprocess_imgsp_v1(sources, tokenizer, has_image=has_image, refine_prompt=refine_prompt)
-    # add end signal and concatenate together
-    conversations = []
-    for source in sources:
-        header = f"{conversation_lib.default_conversation.system}\n\n"
-        conversation = _add_speaker_and_signal(header, source)
-        conversations.append(conversation)
-    # tokenize conversations
-    def get_tokenize_len(prompts):
-        return [len(tokenizer_image_token(prompt, tokenizer)) for prompt in prompts]
-
-    if has_image:
-        input_ids = [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
+        return preprocess_imgsp_llava(sources, tokenizer, has_image=images, refine_prompt=refine_prompt, eval=eval)
     else:
-        conversations_tokenized = _tokenize_fn(conversations, tokenizer)
-        input_ids = conversations_tokenized["input_ids"]
-
-    targets = copy.deepcopy(input_ids)
-    for target, source in zip(targets, sources):
-        if has_image:
-            tokenized_lens = get_tokenize_len([header] + [s["value"] for s in source])
-        else:
-            tokenized_lens = _tokenize_fn([header] + [s["value"] for s in source], tokenizer)["input_ids_lens"]
-        speakers = [sentence["from"] for sentence in source]
-        _mask_targets(target, tokenized_lens, speakers)
-
-    return dict(input_ids=input_ids, labels=targets)
+        raise ValueError(
+            f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
+        )
 
 
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
     RGB_FOLDER = ['frontcamera', 'leftcamera', 'rightcamera', 'rearcamera', 'downcamera']
     
-    def __init__(self, data_path: str,
+    def __init__(self, data_path: Union[List[str], str],
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
-        list_data_dict = json.load(open(data_path, "r"))
+        if isinstance(data_path, str):
+            data_path = [data_path]
+        list_data_dict = []
+        for path in data_path:
+            with open(path, "r") as f:
+                list_data_dict.extend(json.load(f))
 
         self.dataset_path = data_args.dataset_path
+        self.dataset_state = data_args.dataset_state
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
-        random.shuffle(self.list_data_dict)
+        self.eval = getattr(data_args, "cot_eval", False)
+        if not self.eval:
+            random.shuffle(self.list_data_dict)
         self.data_args = data_args
 
     def __len__(self):
@@ -864,95 +700,94 @@ class LazySupervisedDataset(Dataset):
             cur_len = cur_len if ('image' in sample) or ('video' in sample) else -cur_len
             length_list.append(cur_len)
         return length_list
-    
-    def find_cruise_height_idx(self, trajectory):
-        z_values = np.asarray(trajectory)[:, 2]
-        z_diffs = np.diff(z_values)
-        threshold = 0.1
-        small_diff_indices = np.where(np.abs(z_diffs) < threshold)[0]
-        if len(small_diff_indices) == 0:
-            
-            cruise_height_idx = 0
-            land_idx = len(z_diffs)
-        else:
-            cruise_height_idx = small_diff_indices[0]
-            land_idx = small_diff_indices[-1] + 1
-            if land_idx == len(z_diffs):
-                land_idx = small_diff_indices[-2] + 1
-        return cruise_height_idx, land_idx
-    
-    def get_stage(self, trajectory, frame_num):
-        def turning_stage(p0,p1,p2):
-            prev_vec = p1 - p0
-            now_vec = p2 - p1
-            delta_angle = np.arccos(np.dot(prev_vec, now_vec) / (np.linalg.norm(prev_vec)+ 1e-6) / (np.linalg.norm(now_vec)+ 1e-6)) * 180 / np.pi
-            if delta_angle > 25 and delta_angle < 120:
-                if int(np.cross(prev_vec, now_vec)) > 0:
-                    return 'right'
-                else:
-                    return 'left'
-            return 'cruise'
-        assist = 0
-        trajectory = np.asarray(trajectory)
-        z_values = trajectory[:, 2]
-        now_z = z_values[frame_num - 1]
-        future_z = z_values[min(frame_num+2, len(z_values)-1)]
-        stage = 'cruise'
-        if now_z - future_z > 5:
-            stage = 'take off'
-        elif now_z - future_z < -5:
-            stage = 'landing'
-        prev_vec = np.array([0,0,0])
-        if frame_num >= 2 and frame_num < len(trajectory):
-            prev_vec =  np.array(trajectory[frame_num - 1, :3] - trajectory[frame_num - 2, :3])
-            if stage == 'cruise':
-                stage = turning_stage(trajectory[frame_num - 2 ,:2], trajectory[frame_num - 1, :2], trajectory[frame_num, :2])
-        if frame_num >= 1 and frame_num < len(trajectory) - 1:
-            future_p = trajectory[frame_num + 1, :2]
-            next_p = trajectory[frame_num, :2]
-            next_stage = turning_stage(trajectory[frame_num-1, :2], next_p, future_p)
-            future_z = z_values[min(frame_num+3, len(z_values)-1)]
-            if trajectory[frame_num, 2] - future_z < -5:
-                next_stage = 'landing'
-            if next_stage == 'left' or next_stage == 'right' or next_stage == 'landing':
-                assist = 1
-        return stage, prev_vec, assist
         
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        attempt, max_attempt = 0, 15
         ori_sources = None
-        suffix = None
-        while attempt < max_attempt:
-            infos = self.list_data_dict[i]
+        infos = self.list_data_dict[i]
+        dataset_name = infos['dataset']
+        frame_num = infos['frame']
+        bbox = infos['bbox']
+        subgoal = infos['subgoal']
+        states = self.dataset_state[dataset_name]
+        if dataset_name == 'traveluav':
             traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
             json_path = os.path.join(self.dataset_path, infos['json'])
-            frame_num = infos['frame']
-            break
-            
-        with open(json_path, 'r') as f:
-            sources = json.load(f)
+            with open(json_path, 'r') as f:
+                sources = json.load(f)
 
-        if isinstance(i, int):
-            sources = [sources]
-        ori_sources = copy.deepcopy(sources)
+            if isinstance(i, int):
+                sources = [sources]
+            ori_sources = copy.deepcopy(sources)
             
-        assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+            assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+            height = 256
+            width = 256
+        elif dataset_name == 'aerialvg':
+            image_path = infos['json']
+            height = infos['height']
+            width = infos['width']
+            sources = [{"conversations": [{"from": "human", "value": infos['conversations']}, {"from": "gpt", "value": ""}]}]
+            ori_sources = copy.deepcopy(sources)
+        else:
+            raise ValueError(
+                f"Unsupported dataset name: {dataset_name}"
+            )
         
-        stage = ''
-        
-        if 'image_feature_path' in sources[0]:
-            """
-            ### direct feature load
-            # image_feature_path = sources[0]['image_feature_path']
-            # t1 = time.time()
-            # image_feature = np.load(image_feature_path)[:frame_num]
-            # t2 = time.time()       
-            # print(f"Load image feature time: {t2-t1}")
-            # fr, ca, tok, dim = image_feature.shape
-            # image = torch.from_numpy(image_feature).view(fr * ca, tok, dim)
-            # rgb image load      
-            """
-            if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava")  :
+        assist = ""
+        if subgoal != "":
+            # TODO: wmq! convert_to_qwen25vl_format and llava_next_format. image rescale.
+            assist += f"Subgoal: {subgoal}."
+            for state in states:
+                if state in bbox:
+                    if state == "front":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
+                    elif state == "left":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
+                    elif state == "right":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
+                    elif state == "rear":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
+                    elif state == "down":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
+                    elif state == "current":
+                        if self.data_args.bbox_scale:
+                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                        else:
+                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                        assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+            assist = assist.rstrip(", ")  
+            assist = re.sub(r',\s*$', '.', assist)
+        if dataset_name != "aerialvg":
+            assist += "\nControl:"
+
+        if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava")  :
+            if dataset_name == "traveluav":
                 traj_camera_list = []
                 for idx, camera_name in enumerate(self.RGB_FOLDER):
                     traj_camera_list.append(sorted([os.path.join(traj_dir, camera_name, filename) for filename in os.listdir(os.path.join(traj_dir,camera_name))]))
@@ -968,114 +803,14 @@ class LazySupervisedDataset(Dataset):
                     images = [Image.open(img_path).convert('RGB') for img_path in frame_imgs]
                     traj_imgs.append(images)
                 image = traj_imgs[(frame_num-1):frame_num][0]
-            elif conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-                images_npy_path = os.path.join(traj_dir, 'rgb_imgs.tensor')
-                image = torch.load(images_npy_path)[(frame_num-1)*5:frame_num*5]
             else:
-                raise ValueError(
-                    f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
-                )
-            stage, future_delta, assist = self.get_stage(sources[0]['trajectory'], frame_num)
-
-            cur_pos = sources[0]['trajectory'][frame_num - 1][:3]
-            x, y = ori_sources[0]['trajectory'][-1][0], ori_sources[0]['trajectory'][-1][1]
-            rotation_matrix = rotation_matrix_from_vector(x, y)
-            future_delta =  transform_point(future_delta, rotation_matrix)
-            future_delta = future_delta / (np.linalg.norm(future_delta) + 1e-8)
-            future_delta_str = ','.join([str(round(x, 1)) for x in future_delta])
-            
-            cur_pos = transform_point(cur_pos, rotation_matrix)
-            cur_pos_str = ','.join([str(round(x, 1)) for x in cur_pos])
-            
-            """
-            ### direct img load
-            # processor = self.data_args.image_processor
-            # index_list = sources[0]['index']
-            # history_images = [] # his_fr * camera
-            # for this_frame_idx in range(frame_num):
-            #     real_index = index_list[this_frame_idx]
-            #     rgb_paths = [os.path.join(traj_dir, name, str(real_index).zfill(6) + '.png') for name in self.__class__.RGB_FOLDER]
-            #     this_images = [np.asarray(Image.open(img_file).convert('RGB')) for img_file in rgb_paths]
-            #     history_images.extend(this_images)
-            # history_images = np.asarray(history_images)
-            # t3 = time.time()
-            # image = processor.preprocess(history_images, return_tensors='pt')['pixel_values']
-            # print(f"Load image time/frames: {t2-t1} / {frame_num}")
-            """
-            sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]),
-                    self.data_args, stage=stage, delta = future_delta_str, cur = cur_pos_str)
-
-        elif 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
-            
-            # convert image type for OCR VQA dataset
-            if image_file is not None:
-                if 'ocr' in image_file:
-                    if not os.path.exists(os.path.join(image_folder, image_file)):
-                        image_file = image_file.replace(".jpg", ".png")
-                # convert image for VG dataset
-                elif 'VG_100K' in image_file:
-                    image_file = image_file.replace('VG_100K_2', 'images')
-                    image_file = image_file.replace('VG_100K', 'images')
-            
-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
-                    else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            sources = preprocess_multimodal(
-                copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args)
-        elif 'video' in sources[0]:
-            video_file = self.list_data_dict[i]['video']
-            
-            video_start_idx = self.list_data_dict[i].get('start_idx', 0)
-            video_end_idx = self.list_data_dict[i].get('end_idx', -1)
-            
-            video_folder = self.data_args.video_folder
-            video_file = os.path.join(video_folder, video_file)
-            suffix = video_file.split('.')[-1]
-            if not os.path.exists(video_file):
-                print('File {} not exist!'.format(video_file))
-            
-            if suffix == 'pkl':
-                video_info = pickle.load(open(video_file, 'rb'))
-                image = torch.from_numpy(video_info['feats'][:, 1:])
-                input_prompt = video_info['inputs'].replace('...', '')
-                # replace the default image token with multiple tokens
-                input_prompt = input_prompt.replace(DEFAULT_IMAGE_TOKEN, 
-                                                    DEFAULT_IMAGE_TOKEN * self.data_args.video_token)
-                sources, query_prompt = preprocess_multimodal_movie(
-                    copy.deepcopy([e["conversations"] for e in sources]),
-                    self.data_args, input_prompt)
-            else:
-                vr = VideoReader(video_file, ctx=cpu(0))
-                sample_fps = round(vr.get_avg_fps()/self.data_args.video_fps)
-                video_end_idx = len(vr) if video_end_idx == -1 else video_end_idx
-                frame_idx = [i for i in range(video_start_idx, video_end_idx, sample_fps)]
-                video = vr.get_batch(frame_idx).asnumpy()
-                processor = self.data_args.image_processor
-                image = processor.preprocess(video, return_tensors='pt')['pixel_values']
-                sources = preprocess_multimodal(
-                    copy.deepcopy([e["conversations"] for e in sources]),
-                    self.data_args)
+                image = [Image.open(image_path).convert('RGB')]
         else:
-            sources = copy.deepcopy([e["conversations"] for e in sources])
+            raise ValueError(
+                f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
+            )
+        sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]),
+                self.data_args, assist, dataset_name, eval=self.eval)
                 
         has_image = (image is not None)
         data_dict = preprocess(
@@ -1084,56 +819,44 @@ class LazySupervisedDataset(Dataset):
             self.tokenizer,
             has_image=has_image,
             prompt=self.data_args.input_prompt,
-            refine_prompt=self.data_args.refine_prompt)
+            refine_prompt=self.data_args.refine_prompt,
+            eval=self.eval)
         
         prompt = data_dict.get('prompt', None)
-
-        # TODO: wmq qwen!
-        if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-            data_dict = dict(input_ids=data_dict["input_ids"][0],
-                        labels=data_dict["labels"][0])
-        elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
-            data_dict["input_ids"] = data_dict["input_ids"][0]
-            data_dict["labels"] = data_dict["labels"][0]
+        if not self.eval:
+            if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
+                data_dict = dict(input_ids=data_dict["input_ids"][0],
+                            labels=data_dict["labels"][0])
+            elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
+                data_dict["input_ids"] = data_dict["input_ids"][0]
+                data_dict["labels"] = data_dict["labels"][0]
         
-        if suffix == 'pkl':
-            prompt = [query_prompt]
+        data_dict['image'] = image
+        if dataset_name == "aerialvg":
+            return data_dict
+        trajectory_data = np.array(ori_sources[0]['trajectory'])
+        history_waypoint = trajectory_data[0:frame_num, 0:3]
+        waypoint = trajectory_data[frame_num:min(ori_sources[0]['length'], frame_num + 7), 0:3]
+        if len(waypoint) == 0:
+            waypoint = np.array([history_waypoint[-1] for i in range(7)])
+        elif len(waypoint) < 7:
+            waypoint = np.array([waypoint[i] if i < len(waypoint) else waypoint[-1] for i in range(7)])
 
-        if 'image_feature_path' in ori_sources[0]:
-            data_dict['image'] = image
-            trajectory_data = np.array(ori_sources[0]['trajectory'])
-            history_waypoint = trajectory_data[0:frame_num, 0:3]
-            waypoint = trajectory_data[frame_num:min(ori_sources[0]['length'], frame_num + 7), 0:3]
-            if len(waypoint) == 0:
-                waypoint = np.array([history_waypoint[-1] for i in range(7)])
-            elif len(waypoint) < 7:
-                waypoint = np.array([waypoint[i] if i < len(waypoint) else waypoint[-1] for i in range(7)])
-
-            waypoint = waypoint - history_waypoint[-1]
-            x, y = ori_sources[0]['trajectory'][-1][0], ori_sources[0]['trajectory'][-1][1]
-            rotation_matrix = rotation_matrix_from_vector(x, y)
-            history_waypoint = transform_point(history_waypoint, rotation_matrix)
-            waypoint = transform_point(waypoint, rotation_matrix)
-            
-            use_angle = True
-            if use_angle:
-                waypoint = waypoint2angle(waypoint)
-            
-            data_dict['history_waypoint'] = torch.tensor(history_waypoint).view(-1)
-            data_dict['waypoint'] = torch.tensor(waypoint[0]).view(-1)
-            orientation = trajectory_data[frame_num-1, 3:6]
-            data_dict['orientation'] = torch.tensor(orientation).view(-1)
-            data_dict['is_help'] = torch.tensor(assist).view(-1)
-            
-        elif 'start_frame' in ori_sources[0]:
-            data_dict['image'] = image
-            data_dict['history_waypoint'] = torch.tensor(ori_sources[0]['history_waypoints']).view(-1)
-            data_dict['waypoint'] = torch.tensor(ori_sources[0]['future_waypoints']).view(-1)
-            data_dict['end'] = torch.tensor(int(ori_sources[0]['is_end'])).view(-1)
-        elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
-            crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+        waypoint = waypoint - history_waypoint[-1]
+        x, y = ori_sources[0]['trajectory'][-1][0], ori_sources[0]['trajectory'][-1][1]
+        rotation_matrix = rotation_matrix_from_vector(x, y)
+        history_waypoint = transform_point(history_waypoint, rotation_matrix)
+        waypoint = transform_point(waypoint, rotation_matrix)
+        
+        use_angle = True
+        if use_angle:
+            waypoint = waypoint2angle(waypoint)
+        
+        data_dict['history_waypoint'] = torch.tensor(history_waypoint).view(-1)
+        data_dict['waypoint'] = torch.tensor(waypoint[0]).view(-1)
+        orientation = trajectory_data[frame_num-1, 3:6]
+        data_dict['orientation'] = torch.tensor(orientation).view(-1)
+        data_dict['is_help'] = torch.tensor(0).view(-1)
         
         # prompt exist in the data
         if prompt is not None:
@@ -1210,15 +933,22 @@ class DataCollatorForSupervisedDataset(object):
         # if 'prompt' in instances[0]:
             # batch['prompts'] = [instance['prompt'] for instance in instances]
         
-        if 'waypoint' in instances[0]:
-            batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances])
-            batch['historys'] = [instance['history_waypoint'] for instance in instances]
+        # if 'waypoint' in instances[0]:
+        #     batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances])
+        #     batch['historys'] = [instance['history_waypoint'] for instance in instances]
+        if any('waypoint' in instance for instance in instances):
+            batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances if 'waypoint' in instance])
+            batch['historys'] = [instance['history_waypoint'] for instance in instances if 'history_waypoint' in instance]
+
+        # if 'orientation' in instances[0]:
+        #     batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
+        if any('orientation' in instance for instance in instances):
+            batch['orientations'] = torch.stack([instance['orientation'] for instance in instances if 'orientation' in instance])
         
-        if 'orientation' in instances[0]:
-            batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
-        
-        if 'end' in instances[0]:
-            batch['ends'] = torch.stack([instance['end'] for instance in instances]).squeeze()
+        # if 'end' in instances[0]:
+        #     batch['ends'] = torch.stack([instance['end'] for instance in instances]).squeeze()
+        if any('end' in instance for instance in instances):
+            batch['ends'] = torch.stack([instance['end'] for instance in instances if 'end' in instance]).squeeze()
         return batch
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
@@ -1275,16 +1005,15 @@ def train():
             config.rope_scaling = {"type": "linear", "factor": scaling_factor}
     
     if "llava-v1.6" in model_args.model_name_or_path:
-        ModelClass = LlavaNextUAVForCausalLM
-    elif "llava" in model_args.model_name_or_path:
-        ModelClass = LlavaUAVForCausalLM
+        if model_args.cot:
+            ModelClass = LlavaNextCOTUAVForCausalLM
+        else:
+            ModelClass = LlavaNextUAVForCausalLM
     elif "Qwen2.5-VL" in model_args.model_name_or_path:
-        ModelClass = Qwen2_5_VLUAVForCausalLM
-    elif "llama" in model_args.model_name_or_path or 'vicuna' in model_args.model_name_or_path:
-        ModelClass = LlavaLlamaAttForCausalLM
-    elif "Qwen" in model_args.model_name_or_path:
-        ModelClass = LlavaQwenAttForCausalLM
-        # config._attn_implementation = 'eager'
+        if model_args.cot:
+            ModelClass = Qwen2_5_VLCOTUAVForCausalLM
+        else:
+            ModelClass = Qwen2_5_VLUAVForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_args.model_name_or_path}")
 
@@ -1333,85 +1062,25 @@ def train():
         rank0_print("Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
 
-    if 'mpt' in model_args.model_name_or_path:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right"
-        )
-    else:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right",
-            use_fast=False,
-        )
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        use_fast=False,
+    )
 
-    if model_args.version == "v0":
-        if tokenizer.pad_token is None:
-            smart_tokenizer_and_embedding_resize(
-                special_tokens_dict=dict(pad_token="[PAD]"),
-                tokenizer=tokenizer,
-                model=model,
-            )
-    elif model_args.version == "v0.5":
+    if tokenizer.unk_token:
         tokenizer.pad_token = tokenizer.unk_token
+    else: #TODO: wmq. NOT SURE!
+        tokenizer.unk_token = "<unk>"
+        # tokenizer.pad_token = tokenizer.unk_token
+        # tokenizer.add_special_tokens({"unk_token": "<unk>"})
+        # model.resize_token_embeddings(len(tokenizer))
+    if model_args.version in conversation_lib.conv_templates:
+        conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
     else:
-        if tokenizer.unk_token:
-            tokenizer.pad_token = tokenizer.unk_token
-        else: #TODO: wmq. NOT SURE!
-            tokenizer.unk_token = "<unk>"
-            # tokenizer.pad_token = tokenizer.unk_token
-            # tokenizer.add_special_tokens({"unk_token": "<unk>"})
-            # model.resize_token_embeddings(len(tokenizer))
-        if model_args.version in conversation_lib.conv_templates:
-            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-        else:
-            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-
-    if model_args.vision_tower is not None:
-        if not "llava" in model_args.model_name_or_path:
-            model.get_model().initialize_vision_modules(
-                model_args=model_args,
-                fsdp=training_args.fsdp,
-                max_token=training_args.model_max_length
-            )
-        else:
-            model.get_model().initialize_vision_modules(
-                model_args=model_args,
-                fsdp=training_args.fsdp
-            )
-            
-        
-        vision_tower = model.get_vision_tower()
-        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
-
-        data_args.image_processor = vision_tower.image_processor
-        data_args.is_multimodal = True
-
-        model.config.image_aspect_ratio = data_args.image_aspect_ratio
-        model.config.image_grid_pinpoints = data_args.image_grid_pinpoints
-
-        model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
-        if model_args.tune_mm_mlp_adapter:
-            model.requires_grad_(False)
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = True
-
-        model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
-        if training_args.freeze_mm_mlp_adapter:
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = False
-
-        if training_args.bits in [4, 8]:
-            model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
-
-        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-        training_args.use_im_start_end = model_args.mm_use_im_start_end
-        model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-        model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+        conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     if model_args.vision_tower is None and "Qwen2.5-VL" in model_args.model_name_or_path:
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
@@ -1456,6 +1125,14 @@ def train():
     model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<his>': tokenizer.encode('<his>', add_special_tokens=False)[0],
                                 ',': tokenizer.encode(',', add_special_tokens=False)[0], ';': tokenizer.encode(';', add_special_tokens=False)[0]})
 
+    # smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<bbox_2d_front>', '<bbox_2d_left>', '<bbox_2d_right>', '<bbox_2d_rear>', '<bbox_2d_down>', '<bbox_2d>'], tokenizer=tokenizer, model=model)
+    
+    # model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<bbox_2d_front>': tokenizer.encode('<bbox_2d_front>', add_special_tokens=False)[0],
+    #                             '<bbox_2d_left>': tokenizer.encode('<bbox_2d_left>', add_special_tokens=False)[0],'<bbox_2d_right>': tokenizer.encode('<bbox_2d_right>', add_special_tokens=False)[0],
+    #                             '<bbox_2d_rear>': tokenizer.encode('<bbox_2d_rear>', add_special_tokens=False)[0], '<bbox_2d_down>': tokenizer.encode('<bbox_2d_down>', add_special_tokens=False)[0],
+    #                             '<bbox_2d_current>': tokenizer.encode('<bbox_2d>', add_special_tokens=False)[0],
+    #                             ',': tokenizer.encode(',', add_special_tokens=False)[0], ';': tokenizer.encode(';', add_special_tokens=False)[0]})
+    
     # all the attention modules require grad
     if not ("llava" in model_args.model_name_or_path or "Qwen2.5-VL" in model_args.model_name_or_path):
         model.get_model().initialize_attention_modules(model_args)
@@ -1476,6 +1153,7 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
     
+    #TODO: wmq  bbox module require_grads=True.
     if model_args.tune_waypoint_predictor:
         for p in model.waypoint_emb.parameters():
             p.requires_grad = True

@@ -28,7 +28,7 @@ from llamavid.train.train_uav.train_uav_notice import preprocess_multimodal, pre
 def load_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, _ = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, _ = load_pretrained_model(model_path, args.model_base, model_name, args)
     if tokenizer.unk_token:
         tokenizer.pad_token = tokenizer.unk_token
     else: #TODO: NOT SURE!
