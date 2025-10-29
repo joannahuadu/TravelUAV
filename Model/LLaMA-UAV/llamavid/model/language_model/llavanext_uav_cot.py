@@ -13,18 +13,29 @@
 #    limitations under the License.
 
 from typing import List, Optional, Tuple, Union
-
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
 from transformers import AutoConfig, AutoModelForCausalLM, LlavaNextConfig, LlavaNextForConditionalGeneration
+from transformers.modeling_outputs import ModelOutput
 
 from llamavid.model.language_model.llama_uav import CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
 from llamavid.constants import WAYPOINT_LABEL_TOKEN, WAYPOINT_INPUT_TOKEN_LLAVA 
 
 from transformers.utils import is_torchdynamo_compiling
+
+@dataclass
+class LlavaNextCausalLMOutputWithPast(ModelOutput):
+    loss: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[List[torch.FloatTensor]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    image_hidden_states: Optional[torch.FloatTensor] = None
+
 class LlavaNextConfig(LlavaNextConfig):
     model_type = "llavanext_uav_cot"
  
@@ -136,6 +147,7 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
         historys: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         return_waypoints: Optional[bool] = False,
+        cot_eval: Optional[bool] = False,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPastUAV]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -157,7 +169,7 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
                 input_ids = input_ids.to(device=self.device)
             if attention_mask.device != self.device:
                 attention_mask = attention_mask.to(device=self.device)
-            if labels.device != self.device:
+            if labels and labels.device != self.device:
                 labels = labels.to(device=self.device)
         history_embeds = []
         
@@ -283,6 +295,16 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
         
         if return_waypoints:
             return loss, predicted_waypoints
+        
+        if cot_eval:
+            return LlavaNextCausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+                image_hidden_states=outputs.image_hidden_states,
+            )
         
         if not return_dict:
             output = (waypoints_feat,) + outputs[1:]

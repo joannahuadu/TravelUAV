@@ -77,6 +77,7 @@ class DataArguments:
             "aerialvg": ['current']
         })
     bbox_scale: bool = field(default=False)
+    cot_eval: bool = field(default=False)
     
 @dataclass
 class ModelArguments:
@@ -88,6 +89,7 @@ class ModelArguments:
     groundingdino_config: Optional[str] = field(default=None)
     groundingdino_model_path: Optional[str] = field(default=None)
     version: Optional[str] = field(default="v0")
+    cot: bool = field(default=False)
     
     
 parser = transformers.HfArgumentParser((CommonArguments, ModelArguments, DataArguments))

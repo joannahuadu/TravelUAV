@@ -21,14 +21,14 @@ from src.common.param import args, model_args, data_args
 from env_uav import AirVLNENV
 from assist import Assist
 from src.vlnce_src.closeloop_util import EvalBatchState, BatchIterator, setup, CheckPort, initialize_env_eval, is_dist_avail_and_initialized
-from llamavid.train.train_uav_cot import LazySupervisedDataset
+from llamavid.train.train_uav.train_uav_cot import LazySupervisedDataset
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from torch.utils.data import DataLoader
 
 
-def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=128):
+def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500):
 
     os.makedirs(eval_save_dir, exist_ok=True)
     save_file = f"{eval_save_dir}/eval_results.jsonl"
@@ -40,18 +40,22 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=128
     model.eval()
 
     with torch.no_grad(), open(save_file, "w", encoding="utf-8") as f:
-        for batch in tqdm(dataloader, desc="Evaluating"):
+        for batch in tqdm.tqdm(dataset, desc="Evaluating"):
 
             input_ids = batch["input_ids"].to(model.device)
             attention_mask = batch["attention_mask"].to(model.device)
 
             if "pixel_values" in batch:
                 pixel_values = batch["pixel_values"].to(model.device)
+                image_sizes = batch["image_sizes"].to(model.device)
                 outputs = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     pixel_values=pixel_values,
+                    image_sizes=image_sizes,
                     max_new_tokens=max_new_tokens,
+                    cot_eval = True,
+                    use_cache = False,
                 )
             else:
                 outputs = model.generate(
@@ -70,7 +74,7 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=128
         
 if __name__ == "__main__":
     eval_save_path = args.eval_save_path
-    
+    data_args.dataset_path = args.dataset_path
     model_wrapper = TravelModelWrapper(model_args=model_args, data_args=data_args)
     
     eval_dataset = LazySupervisedDataset(tokenizer=model_wrapper.tokenizer,

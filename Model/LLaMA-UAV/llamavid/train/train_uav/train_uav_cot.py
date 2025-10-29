@@ -401,6 +401,7 @@ def preprocess_multimodal(
     data_args: DataArguments,
     assist: str,
     dataset_name: str,
+    eval: bool = False,
 ) -> Dict:
     """
         process image token's representation
@@ -415,13 +416,18 @@ def preprocess_multimodal(
         prefix = "You are given five drone-view images from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown.\nNavigation goal: "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
+        if eval:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target. ASSISTANT: Subgoal:"
     elif dataset_name == "airvln":
         prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
     elif dataset_name == "aerialvg":
         prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
-        suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
+        if not eval:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
+        else:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). ASSISTANT: Subgoal:"
     else:
         raise ValueError(
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
@@ -551,6 +557,7 @@ def preprocess_imgsp_llava(
     has_image: List[Image.Image],
     img_token: str = '<image>',
     refine_prompt: bool = False,
+    eval: bool = False,
 ) -> Dict:
     processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
     system_message = {
@@ -560,7 +567,8 @@ def preprocess_imgsp_llava(
         ]
     }
     messages = _build_messages(sources[0], has_image, system_message)
-
+    if eval:
+        messages = [m for m in messages if m["role"] in ("system", "user")]
     full_result = processor.apply_chat_template(
         messages, tokenize=True, return_dict=True, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length
     )
@@ -568,6 +576,12 @@ def preprocess_imgsp_llava(
     input_ids = full_result["input_ids"]
     if isinstance(input_ids, list):
         input_ids = torch.tensor(input_ids).unsqueeze(0)
+
+    if eval:
+        full_result["labels"] = None
+        full_result["input_ids"] = input_ids
+        full_result['prompt'] = sources
+        return full_result
 
     labels = torch.full_like(input_ids, IGNORE_INDEX)
 
@@ -623,6 +637,7 @@ def preprocess(
     has_image: bool = False,
     prompt: str = None,
     refine_prompt: bool = False,
+    eval: bool = False,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -634,7 +649,7 @@ def preprocess(
     if conversation_lib.default_conversation.version.startswith("imgsp_qwen"):
         return preprocess_imgsp_qwen(sources, tokenizer, has_image=images, refine_prompt=refine_prompt)
     elif conversation_lib.default_conversation.version.startswith("imgsp_llava"):
-        return preprocess_imgsp_llava(sources, tokenizer, has_image=images, refine_prompt=refine_prompt)
+        return preprocess_imgsp_llava(sources, tokenizer, has_image=images, refine_prompt=refine_prompt, eval=eval)
     else:
         raise ValueError(
             f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
@@ -661,7 +676,9 @@ class LazySupervisedDataset(Dataset):
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
-        random.shuffle(self.list_data_dict)
+        self.eval = getattr(data_args, "cot_eval", False)
+        if not self.eval:
+            random.shuffle(self.list_data_dict)
         self.data_args = data_args
 
     def __len__(self):
@@ -793,7 +810,7 @@ class LazySupervisedDataset(Dataset):
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
             )
         sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args, assist, dataset_name)
+                self.data_args, assist, dataset_name, eval=self.eval)
                 
         has_image = (image is not None)
         data_dict = preprocess(
@@ -802,16 +819,17 @@ class LazySupervisedDataset(Dataset):
             self.tokenizer,
             has_image=has_image,
             prompt=self.data_args.input_prompt,
-            refine_prompt=self.data_args.refine_prompt)
+            refine_prompt=self.data_args.refine_prompt,
+            eval=self.eval)
         
         prompt = data_dict.get('prompt', None)
-
-        if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
-            data_dict = dict(input_ids=data_dict["input_ids"][0],
-                        labels=data_dict["labels"][0])
-        elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
-            data_dict["input_ids"] = data_dict["input_ids"][0]
-            data_dict["labels"] = data_dict["labels"][0]
+        if not self.eval:
+            if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
+                data_dict = dict(input_ids=data_dict["input_ids"][0],
+                            labels=data_dict["labels"][0])
+            elif conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava"):
+                data_dict["input_ids"] = data_dict["input_ids"][0]
+                data_dict["labels"] = data_dict["labels"][0]
         
         data_dict['image'] = image
         if dataset_name == "aerialvg":
