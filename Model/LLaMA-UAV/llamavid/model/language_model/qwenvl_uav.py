@@ -170,6 +170,8 @@ class Qwen2_5_VLUAVForCausalLM(Qwen2_5_VLForConditionalGeneration):
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
+        inputs_embeds = inputs_embeds.to(self.waypoint_emb.weight.device)
+        labels = labels.to(self.waypoint_emb.weight.device)
         inputs_embeds[labels == WAYPOINT_LABEL_TOKEN] = self.waypoint_emb.weight
         
         outputs = self.model(

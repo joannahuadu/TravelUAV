@@ -527,7 +527,7 @@ class EventHandler(object):
                 p_s.append(None)
                 continue
             else:
-                subprocess_execute = "xvfb-run -a -s \"-screen 0 1024x1024x32\" bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
+                subprocess_execute = " bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
                     choose_env_exe_paths[index],
                     gpu_id,
                     str(CWD_DIR / 'settings' / str(ports[index]) / 'settings.json'),
@@ -567,7 +567,7 @@ class EventHandler(object):
         env_info = env_exec_path_dict.get(scene_id)
         
         env_path = os.path.join(args.root_path, env_info['exec_path'], env_info['bash_name'] + '.sh')
-        subprocess_execute = "xvfb-run -a -s \"-screen 0 1024x1024x32\" bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
+        subprocess_execute = " bash {} -RenderOffscreen -NoSound -NoVSync -GraphicsAdapter={} -settings={} ".format(
                     env_path,
                     gpu_id,
                     str(CWD_DIR / 'settings' / str(port) / 'settings.json'),

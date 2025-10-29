@@ -4,9 +4,9 @@
 # ANALYSIS_LIST="eval dir list" # ANALYSIS_LIST="baseline baseline2"
 # PATH_TYPE_LIST="full easy hard" # full easy hard
 
-ROOT_DIR='/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/eval_closeloop_qwen0.5b128_all'
+ROOT_DIR='/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/eval_closeloop_qwen7b128_all_1'
 ANALYSIS_LIST="."
-PATH_TYPE_LIST="hard"
+PATH_TYPE_LIST="full"
 
 # CUDA_VISIBLE_DEVICES=0 python3 ./AirVLN/utils/metric.py \
 CUDA_VISIBLE_DEVICES=4 python3 /mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/utils/metric.py \

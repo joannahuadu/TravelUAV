@@ -3,6 +3,8 @@ import torch
 from src.model_wrapper.base_model import BaseModelWrapper
 from src.model_wrapper.utils.travel_util import *
 from src.vlnce_src.dino_monitor_online import DinoMonitor
+from llamavid import conversation as conversation_lib
+from transformers import CLIPImageProcessor
 
 class TravelModelWrapper(BaseModelWrapper):
     def __init__(self, model_args, data_args):
@@ -13,6 +15,10 @@ class TravelModelWrapper(BaseModelWrapper):
         self.dino_moinitor = None
         self.model_args = model_args
         self.data_args = data_args
+        if model_args.version in conversation_lib.conv_templates:
+            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        else:
+            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     def prepare_inputs(self, episodes, target_positions, assist_notices=None):
         inputs = []
@@ -30,11 +36,12 @@ class TravelModelWrapper(BaseModelWrapper):
             inputs.append(input_item)
             rot_to_targets.append(rot_to_target)
         batch = inputs_to_batch(tokenizer=self.tokenizer, instances=inputs)
-
+        # TODO: wmq modify.
         inputs_device = {k: v.to(self.model.device) for k, v in batch.items() 
-            if 'prompts' not in k and 'images' not in k and 'historys' not in k}
-        inputs_device['prompts'] = [item for item in batch['prompts']]
-        inputs_device['images'] = [item.to(self.model.device) for item in batch['images']]
+            if 'prompts' not in k and 'images' not in k and 'historys' not in k and v is not None}
+        if 'prompts' in batch and batch['prompts'] is not None:
+            inputs_device['prompts'] = [item for item in batch['prompts']]
+        inputs_device['images'] = [item for item in batch['images']]
         inputs_device['historys'] = [item.to(device=self.model.device, dtype=self.model.dtype) for item in batch['historys']]
         inputs_device['orientations'] = inputs_device['orientations'].to(dtype=self.model.dtype)
         inputs_device['return_waypoints'] = True
@@ -43,6 +50,7 @@ class TravelModelWrapper(BaseModelWrapper):
         return inputs_device, rot_to_targets
 
     def run_llm_model(self, inputs):
+        # inputs['output_attentions'] = True
         waypoints_llm = self.model(**inputs).cpu().to(dtype=torch.float32).numpy()
         waypoints_llm_new = []
         for waypoint in waypoints_llm:
@@ -51,7 +59,8 @@ class TravelModelWrapper(BaseModelWrapper):
         return np.array(waypoints_llm_new)
 
     def run_traj_model(self, episodes, waypoints_llm_new, rot_to_targets):
-        inputs = prepare_data_to_traj_model(episodes, waypoints_llm_new, self.image_processor, rot_to_targets)
+        image_processor = CLIPImageProcessor.from_pretrained(self.model_args.image_processor)
+        inputs = prepare_data_to_traj_model(episodes, waypoints_llm_new, image_processor, rot_to_targets)
         waypoints_traj = self.traj_model(inputs, None)
         refined_waypoints = waypoints_traj.cpu().to(dtype=torch.float32).numpy()
         refined_waypoints = transform_to_world(refined_waypoints, episodes)
