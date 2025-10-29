@@ -151,8 +151,14 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default=None,
-                           metadata={"help": "Path to the training data json."})
+    # data_path: str = field(default=None,
+    #                        metadata={"help": "Path to the training data json."})
+    data_path: List[str] = field(default_factory=list,
+        metadata={
+            "help": "Path(s) to one or multiple training data json files.",
+            "nargs": "+"
+        }
+    )
     dataset_path: str = field(default=None,
                            metadata={"help": "Path to the raw data."})
     lazy_preprocess: bool = False
@@ -909,15 +915,22 @@ class DataCollatorForSupervisedDataset(object):
         # if 'prompt' in instances[0]:
             # batch['prompts'] = [instance['prompt'] for instance in instances]
         
-        if 'waypoint' in instances[0]:
-            batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances])
-            batch['historys'] = [instance['history_waypoint'] for instance in instances]
+        # if 'waypoint' in instances[0]:
+        #     batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances])
+        #     batch['historys'] = [instance['history_waypoint'] for instance in instances]
+        if any('waypoint' in instance for instance in instances):
+            batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances if 'waypoint' in instance])
+            batch['historys'] = [instance['history_waypoint'] for instance in instances if 'history_waypoint' in instance]
+
+        # if 'orientation' in instances[0]:
+        #     batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
+        if any('orientation' in instance for instance in instances):
+            batch['orientations'] = torch.stack([instance['orientation'] for instance in instances if 'orientation' in instance])
         
-        if 'orientation' in instances[0]:
-            batch['orientations'] = torch.stack([instance['orientation'] for instance in instances])
-        
-        if 'end' in instances[0]:
-            batch['ends'] = torch.stack([instance['end'] for instance in instances]).squeeze()
+        # if 'end' in instances[0]:
+        #     batch['ends'] = torch.stack([instance['end'] for instance in instances]).squeeze()
+        if any('end' in instance for instance in instances):
+            batch['ends'] = torch.stack([instance['end'] for instance in instances if 'end' in instance]).squeeze()
         return batch
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,

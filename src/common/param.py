@@ -5,7 +5,7 @@ from pathlib import Path
 from utils.CN import CN
 import transformers
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 @dataclass
@@ -70,7 +70,13 @@ class DataArguments:
     input_prompt: Optional[str] = field(default=None)
     refine_prompt: Optional[bool] = field(default=True)
     mm_use_im_start_end: bool = field(default=False)
-
+    dataset_state: Optional[Dict[str, List[str]]] = field(default_factory=
+        lambda: {
+            "traveluav": ['front', 'left', 'right', 'rear', 'down'],
+            "arivln": ['current'],
+            "aerialvg": ['current']
+        })
+    bbox_scale: bool = field(default=False)
     
 @dataclass
 class ModelArguments:
