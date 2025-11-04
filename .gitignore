@@ -47,3 +47,4 @@ __pycache__/
 traj*
 *.out
 *.pth
+fig/*

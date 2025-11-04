@@ -497,7 +497,7 @@ def preprocess_imgsp_qwen(
     img_token: str = '<image>',
     refine_prompt: bool = False,
 ) -> Dict:
-    processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/Qwen2.5-VL-7B-Instruct")
+    processor = AutoProcessor.from_pretrained("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/Qwen2.5-VL-7B-Instruct")
     system_message = {
         "role": "system",
         "content": [
@@ -559,7 +559,7 @@ def preprocess_imgsp_llava(
     refine_prompt: bool = False,
     eval: bool = False,
 ) -> Dict:
-    processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
+    processor = AutoProcessor.from_pretrained("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
     system_message = {
         "role": "system",
         "content": [
