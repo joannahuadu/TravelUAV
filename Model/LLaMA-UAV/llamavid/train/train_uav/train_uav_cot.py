@@ -50,10 +50,26 @@ from decord import VideoReader, cpu
 from transformers.utils import logging
 from transformers import AutoProcessor
 import re
+from peft import PeftModel
+from safetensors.torch import load_file
 logger = logging.get_logger(__name__)
 
 local_rank = None
 
+def load_model(model, model_path):
+    print(f"Loading LoRA weights from {model_path}")
+    if isinstance(model, PeftModel):
+        adapter_path = os.path.join(model_path, "adapter_model.safetensors")
+        lora_state = load_file(adapter_path, device="cpu")
+        model.load_state_dict(lora_state, strict=False)
+    else:
+        model = PeftModel.from_pretrained(model, model_path)
+    non_lora_weights = torch.load(os.path.join(model_path, 'non_lora_trainables.bin'), map_location='cpu')
+    model.load_state_dict(non_lora_weights, strict=False)    
+    mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
+    model.load_state_dict(mm_projector_weights, strict=False)
+    
+    return model
 
 # This is the resize function of Qwen2.5-VL
 def smart_resize(
@@ -178,6 +194,7 @@ class DataArguments:
             "aerialvg": ['current']
         })
     bbox_scale: bool = field(default=False)
+    use_assist: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -213,6 +230,8 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     group_by_modality_length: bool = field(default=False)
     lr_multi: Optional[str] = field(default=None)
+    resume: str = field(default=None,
+                           metadata={"help": "Path to the raw data."})
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -401,6 +420,9 @@ def preprocess_multimodal(
     data_args: DataArguments,
     assist: str,
     dataset_name: str,
+    stage = None,
+    delta = None,
+    cur = None,
     eval: bool = False,
 ) -> Dict:
     """
@@ -413,20 +435,22 @@ def preprocess_multimodal(
     prefix = "Navigation goal: "
     suffix = "\n"
     if dataset_name == "traveluav":
-        prefix = "You are given five drone-view images from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown.\nNavigation goal: "
+        if data_args.use_assist:
+            prefix = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + "\n\nInstruction:These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
+        else:
+            prefix = "\n\nInstruction:These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
         if eval:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target. ASSISTANT: Subgoal:"
     elif dataset_name == "airvln":
-        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
+        prefix = "\n\nInstruction:Given one current image.<image>\n"
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
     elif dataset_name == "aerialvg":
-        prefix = "You are given one drone-view image: <image>\n\nNavigation goal: "
-        if not eval:
-            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
-        else:
+        prefix = "\n\nInstruction:Given one current image.<image>\n"
+        suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
+        if eval:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). ASSISTANT: Subgoal:"
     else:
         raise ValueError(
@@ -700,7 +724,44 @@ class LazySupervisedDataset(Dataset):
             cur_len = cur_len if ('image' in sample) or ('video' in sample) else -cur_len
             length_list.append(cur_len)
         return length_list
-        
+
+    def get_stage(self, trajectory, frame_num):
+        def turning_stage(p0,p1,p2):
+            prev_vec = p1 - p0
+            now_vec = p2 - p1
+            delta_angle = np.arccos(np.dot(prev_vec, now_vec) / (np.linalg.norm(prev_vec)+ 1e-6) / (np.linalg.norm(now_vec)+ 1e-6)) * 180 / np.pi
+            if delta_angle > 25 and delta_angle < 120:
+                if int(np.cross(prev_vec, now_vec)) > 0:
+                    return 'right'
+                else:
+                    return 'left'
+            return 'cruise'
+        assist = 0
+        trajectory = np.asarray(trajectory)
+        z_values = trajectory[:, 2]
+        now_z = z_values[frame_num - 1]
+        future_z = z_values[min(frame_num+2, len(z_values)-1)]
+        stage = 'cruise'
+        if now_z - future_z > 5:
+            stage = 'take off'
+        elif now_z - future_z < -5:
+            stage = 'landing'
+        prev_vec = np.array([0,0,0])
+        if frame_num >= 2 and frame_num < len(trajectory):
+            prev_vec =  np.array(trajectory[frame_num - 1, :3] - trajectory[frame_num - 2, :3])
+            if stage == 'cruise':
+                stage = turning_stage(trajectory[frame_num - 2 ,:2], trajectory[frame_num - 1, :2], trajectory[frame_num, :2])
+        if frame_num >= 1 and frame_num < len(trajectory) - 1:
+            future_p = trajectory[frame_num + 1, :2]
+            next_p = trajectory[frame_num, :2]
+            next_stage = turning_stage(trajectory[frame_num-1, :2], next_p, future_p)
+            future_z = z_values[min(frame_num+3, len(z_values)-1)]
+            if trajectory[frame_num, 2] - future_z < -5:
+                next_stage = 'landing'
+            if next_stage == 'left' or next_stage == 'right' or next_stage == 'landing':
+                assist = 1
+        return stage, prev_vec, assist
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         ori_sources = None
         infos = self.list_data_dict[i]
@@ -709,6 +770,7 @@ class LazySupervisedDataset(Dataset):
         bbox = infos['bbox']
         subgoal = infos['subgoal']
         states = self.dataset_state[dataset_name]
+        stage = ''
         if dataset_name == 'traveluav':
             traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
             json_path = os.path.join(self.dataset_path, infos['json'])
@@ -722,12 +784,29 @@ class LazySupervisedDataset(Dataset):
             assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
             height = 256
             width = 256
+            if self.data_args.use_assist:
+                stage, future_delta, assist = self.get_stage(sources[0]['trajectory'], frame_num)
+                cur_pos = sources[0]['trajectory'][frame_num - 1][:3]
+                x, y = ori_sources[0]['trajectory'][-1][0], ori_sources[0]['trajectory'][-1][1]
+                rotation_matrix = rotation_matrix_from_vector(x, y)
+                future_delta =  transform_point(future_delta, rotation_matrix)
+                future_delta = future_delta / (np.linalg.norm(future_delta) + 1e-8)
+                future_delta_str = ','.join([str(round(x, 1)) for x in future_delta])
+                
+                cur_pos = transform_point(cur_pos, rotation_matrix)
+                cur_pos_str = ','.join([str(round(x, 1)) for x in cur_pos])
+            else:
+                future_delta_str = None
+                cur_pos_str = None
+                
         elif dataset_name == 'aerialvg':
             image_path = infos['json']
             height = infos['height']
             width = infos['width']
             sources = [{"conversations": [{"from": "human", "value": infos['conversations']}, {"from": "gpt", "value": ""}]}]
             ori_sources = copy.deepcopy(sources)
+            future_delta_str = None
+            cur_pos_str = None
         else:
             raise ValueError(
                 f"Unsupported dataset name: {dataset_name}"
@@ -781,8 +860,7 @@ class LazySupervisedDataset(Dataset):
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
-            assist = assist.rstrip(", ")  
-            assist = re.sub(r',\s*$', '.', assist)
+            assist = re.sub(r',\s*$', '.', assist.strip())
         if dataset_name != "aerialvg":
             assist += "\nControl:"
 
@@ -810,7 +888,7 @@ class LazySupervisedDataset(Dataset):
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
             )
         sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args, assist, dataset_name, eval=self.eval)
+                self.data_args, assist, dataset_name, eval=self.eval, stage=stage, delta = future_delta_str, cur = cur_pos_str)
                 
         has_image = (image is not None)
         data_dict = preprocess(
@@ -1170,6 +1248,9 @@ def train():
         if param.requires_grad:
             print(f"Parameter name: {name}, Parameter shape: {param.shape}")
     
+    
+    if training_args.resume:
+        model = load_model(model, training_args.resume)
     model.print_trainable_parameters()
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
