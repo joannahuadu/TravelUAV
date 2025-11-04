@@ -33,15 +33,27 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
     os.makedirs(eval_save_dir, exist_ok=True)
     save_file = f"{eval_save_dir}/eval_results.jsonl"
 
+    if os.path.exists(save_file):
+        with open(save_file, "r", encoding="utf-8") as fr:
+            done_samples = sum(1 for _ in fr)
+    else:
+        done_samples = 0
+
+    print(f"➡️ Resume: Already evaluated {done_samples} samples, skipping them...")
     dataloader = DataLoader(dataset, batch_size=batch_size)
     model = model_wrapper.model
     tokenizer = model_wrapper.tokenizer
 
     model.eval()
+    
+    current_idx = 0
 
-    with torch.no_grad(), open(save_file, "w", encoding="utf-8") as f:
+    with torch.no_grad(), open(save_file, "a", encoding="utf-8") as f:
         for batch in tqdm.tqdm(dataset, desc="Evaluating"):
-
+            if current_idx < done_samples:
+                current_idx += 1
+                continue
+            
             input_ids = batch["input_ids"].to(model.device)
             attention_mask = batch["attention_mask"].to(model.device)
 
@@ -69,7 +81,10 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
             for text in decoded_text:
                 f.write(json.dumps(text, ensure_ascii=False) + "\n")
                 f.flush()
-
+                
+            current_idx += 1
+    
+    print(f"✅ Evaluation finished! {current_idx}/{len(dataset)} samples done.")
     print(f"✅ Evaluation finished! Saved to: {save_file}")
         
 if __name__ == "__main__":
