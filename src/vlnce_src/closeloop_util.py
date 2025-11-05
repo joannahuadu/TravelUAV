@@ -35,8 +35,8 @@ def initialize_env(dataset_path, save_path, train_json_path, activate_maps=[]):
     train_env = AirVLNENV(batch_size=args.batchSize, dataset_path=dataset_path, save_path=save_path, eval_json_path=train_json_path, activate_maps=activate_maps)
     return train_env
 
-def initialize_env_eval(dataset_path, save_path, eval_json_path):
-    train_env = AirVLNENV(batch_size=args.batchSize, dataset_path=dataset_path, save_path=save_path, eval_json_path=eval_json_path)
+def initialize_env_eval(dataset_path, save_path, eval_json_path, eval_split=-1):
+    train_env = AirVLNENV(batch_size=args.batchSize, dataset_path=dataset_path, save_path=save_path, eval_json_path=eval_json_path, eval_split=eval_split)
     return train_env
 
 def save_to_dataset_dagger(episodes, path, dagger_it, teacher_after_collision_steps):
@@ -268,6 +268,7 @@ class EvalBatchState:
                 self.episodes[i].append(observations[i][j])
             self.distance_to_ends[i].append(self._calculate_distance(observations[i][-1], self.target_positions[i]))
             if target_distance_increasing_for_10frames(self.distance_to_ends[i]):
+                print('target_distance_increasing_for_10frames')
                 self.collisions[i] = True
                 self.dones[i] = True
 

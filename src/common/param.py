@@ -59,6 +59,7 @@ class CommonArguments:
     train_json_path: Optional[str] = field(default=None)
     object_name_json_path: Optional[str] = field(default=None)
     map_spawn_area_json_path: Optional[str] = field(default=None)
+    eval_split: int = field(default=-1, metadata={"help": "0-4 for 5-fold cross validation, -1 for no split"})
     
 @dataclass
 class DataArguments:

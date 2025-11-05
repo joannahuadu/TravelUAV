@@ -211,5 +211,5 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         )
         return model_inputs
 
-AutoConfig.register("llava_llama_uav", LlavaConfig, exist_ok=True)
+AutoConfig.register("llava_llama_uav", LlavaConfig)
 AutoModelForCausalLM.register(LlavaConfig, LlavaLlamaAttForCausalLM)
