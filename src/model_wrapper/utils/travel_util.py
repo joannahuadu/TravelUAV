@@ -24,7 +24,6 @@ from llamavid.constants import (
     IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN,
     WAYPOINT_INPUT_TOKEN, WAYPOINT_LABEL_TOKEN, DEFAULT_HISTORY_TOKEN, DEFAULT_WP_TOKEN
 )
-from llamavid.train.train_uav.train_uav_notice import preprocess_multimodal, preprocess
 def load_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
@@ -217,6 +216,7 @@ def transform_point(point, rotation_matrix):
 
 def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, target_point, assist_notice = None):
     # TODO: wmq modify.
+    from llamavid.train.train_uav.train_uav_notice import preprocess_multimodal, preprocess
     ori_sources = None
     input_prompt = data_args.input_prompt
     refine_prompt = data_args.refine_prompt
@@ -302,6 +302,83 @@ def prepare_data_to_inputs(episodes, tokenizer, image_processor, data_args, targ
         
     return data_dict, rotation_to_target
 
+def prepare_data_to_cot_inputs(episodes, tokenizer, image_processor, data_args, target_point, assist_notice = None):
+    from llamavid.train.train_uav.train_uav_cot import preprocess_multimodal, preprocess
+    ori_sources = None
+    input_prompt = data_args.input_prompt
+    refine_prompt = data_args.refine_prompt
+    sources = episodes
+    ori_sources = copy.deepcopy(sources)
+    processor = image_processor
+    images = []
+    for src in sources[::-1]:
+        if 'rgb' in src:
+            images.extend([Image.fromarray(rgb) for rgb in src['rgb']])
+            break
+    if processor is not None:
+        images = np.stack(images, axis=0)
+        image = processor.preprocess(images, return_tensors='pt')['pixel_values']
+    else:
+        image = images
+    
+    conversation = [
+    {
+        "from": "human",
+        "value": sources[-1]['instruction']},
+    {
+        "from": "gpt",
+        "value": ""
+    }]
+    
+    if assist_notice is not None:
+        stage = assist_notice
+    else:
+        stage = 'cruise' if len(sources) > 20 else 'take off'
+    rot = np.array(ori_sources[0]['sensors']['imu']["rotation"])
+    pos = np.array(ori_sources[0]['sensors']['state']['position'])
+    deltas = []
+    for source in ori_sources:
+        if 'rgb' not in source.keys():
+            continue
+        deltas.append((np.array(source['sensors']['state']['position']) - pos))
+    history_waypoint = np.array([(rot.T @ delta) for delta in deltas])
+    rotation_to_target = None
+    
+    target_point = np.array(rot.T @ (target_point - pos))
+    x, y = target_point[0], target_point[1]
+    rotation_to_target = rotation_matrix_from_vector(x, y)
+    history_waypoint = transform_point(history_waypoint, rotation_to_target)
+
+    if len(history_waypoint) >= 2:
+        delta = history_waypoint[-1] - history_waypoint[-2]
+    else:
+        delta = np.array([0, 0, -4.5])
+    delta = delta / (np.linalg.norm(delta) + 1e-8)
+    delta = ','.join([str(round(x, 1)) for x in delta])
+    cur_pos = history_waypoint[-1]
+    cur_pos = ','.join([str(round(x, 1)) for x in cur_pos])
+    if data_args.use_assist:
+        sources = preprocess_multimodal(copy.deepcopy([conversation]), data_args, assist="", dataset_name="traveluav", eval=True, stage=stage, delta=delta, cur=cur_pos)
+    else:
+        sources = preprocess_multimodal(copy.deepcopy([conversation]), data_args, assist="", dataset_name="traveluav", eval=True)
+    has_image = (image is not None)
+    data_dict = preprocess(
+        sources,
+        image,
+        tokenizer,
+        has_image=has_image,
+        prompt=input_prompt,
+        refine_prompt=refine_prompt,
+        eval=True)
+
+    prompt = data_dict.get('prompt', None)
+    # data_dict['images'] = image
+    
+    if prompt is not None:
+    #     data_dict['prompts'] = data_dict.pop('prompt')
+        data_dict.pop('prompt')
+        
+    return data_dict, rotation_to_target
 
 def inputs_to_batch(tokenizer, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
     input_ids, labels = tuple([instance[key] for instance in instances]

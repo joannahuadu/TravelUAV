@@ -58,7 +58,7 @@ def load_pretrained_model(model_path, model_base, model_name, args, load_8bit=Fa
     else:
         kwargs['torch_dtype'] = torch.bfloat16
 
-    if 'vid' or 'uav' or 'cot' in model_name.lower():
+    if 'vid' in model_name.lower() or 'uav' in model_name.lower() or 'cot' in model_name.lower():
         # Load LLaMA-VID model
         if model_base is not None:
             # this may be mm projector only
@@ -123,7 +123,7 @@ def load_pretrained_model(model_path, model_base, model_name, args, load_8bit=Fa
 
     image_processor = None
 
-    if 'vid' or 'uav' in model_name.lower():
+    if 'vid' in model_name.lower() or 'uav' in model_name.lower() or 'cot' in model_name.lower():
         mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
         mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
         if mm_use_im_patch_token:
@@ -144,6 +144,6 @@ def load_pretrained_model(model_path, model_base, model_name, args, load_8bit=Fa
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
     else:
-        context_len = 2048
+        context_len = 4096
 
     return tokenizer, model, image_processor, context_len

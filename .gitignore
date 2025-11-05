@@ -48,3 +48,4 @@ traj*
 *.out
 *.pth
 jobs/*
+fig/*
