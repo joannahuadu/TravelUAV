@@ -55,7 +55,10 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
                 continue
             
             input_ids = batch["input_ids"].to(model.device)
-            attention_mask = batch["attention_mask"].to(model.device)
+            if 'attention_mask' in batch: 
+                attention_mask = batch["attention_mask"].to(model.device)
+            else:
+                attention_mask=input_ids.ne(tokenizer.pad_token_id).to(model.device)
 
             if "pixel_values" in batch:
                 pixel_values = batch["pixel_values"].to(model.device)
@@ -73,7 +76,11 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
                 outputs = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
+                    images=batch['image'].unsqueeze(0).to(model.device),
+                    prompts=[batch['prompt']],
                     max_new_tokens=max_new_tokens,
+                    cot_eval = True,
+                    use_cache = False,
                 )
 
             decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -91,7 +98,8 @@ if __name__ == "__main__":
     eval_save_path = args.eval_save_path
     data_args.dataset_path = args.dataset_path
     model_wrapper = TravelModelWrapper(model_args=model_args, data_args=data_args)
-    
+    if "aerial" in data_args.data_path:
+        data_args.image_processor = model_wrapper.image_processor
     eval_dataset = LazySupervisedDataset(tokenizer=model_wrapper.tokenizer,
                                 data_path=data_args.data_path,
                                 data_args=data_args)

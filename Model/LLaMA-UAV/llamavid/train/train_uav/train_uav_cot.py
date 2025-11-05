@@ -514,6 +514,129 @@ def _build_messages(item: Sequence[str], images: Union[List[str], str], system_m
 
     return messages
 
+def preprocess_imgsp_uav(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False,
+    img_token: str = '<image>',
+    refine_prompt: bool = False,
+    eval: bool = False,
+) -> Dict:
+    conv = conversation_lib.default_conversation.copy()
+    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+
+    # Apply prompt templates
+    conversations = []
+    guided_prompt = []
+    for i, source in enumerate(sources):
+        if roles[source[0]["from"]] != conv.roles[0]:
+            # Skip the first one if it is not from human
+            source = source[1:]
+
+        conv.messages = []
+        img_in_text = False
+        for j, sentence in enumerate(source):
+            role = roles[sentence["from"]]
+            assert role == conv.roles[j % 2], f"{i}"
+            
+            # add guided prompt
+            if role==conv.roles[0]:
+                guided_sent = sentence["prompt"].replace(DEFAULT_IMAGE_TOKEN, '').replace('\n', '')
+                if refine_prompt:
+                    # only keep the useful part of the prompt
+                    object_description = guided_sent.split('degrees from you.')[-1].replace('Please control the drone and find the target.', '').strip()
+                    guided_sent = 'Please pay attention to the obstacles in images and approach the object described below: ' + object_description
+
+                guided_prompt.append(guided_sent)
+            # check if image token in text
+            if img_token in sentence["value"]:
+                img_in_text = True
+            # add image token to all sentence if multimoal input
+            if role==conv.roles[0] and img_in_text and img_token not in sentence["value"]:
+                # randomly add image token to the beginning or end of the sentence
+                img_conv = img_token + '\n' + sentence["value"]
+                
+                conv.append_message(role, img_conv)
+            else:
+                if eval and role == "ASSISTANT":
+                    continue
+                conv.append_message(role, sentence["value"])
+        conversations.append(conv.get_prompt())
+
+    # Tokenize conversations
+    if has_image:
+        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+    else:
+        input_ids = tokenizer(
+            conversations,
+            return_tensors="pt",
+            padding="longest",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        ).input_ids
+    input_ids = input_ids[:, :tokenizer.model_max_length]
+    if eval:
+        return dict(
+            input_ids=input_ids,
+            labels=None,
+            prompt=guided_prompt,
+        )
+    # add wp embedding, input_ids[-1] is </s>, 
+    input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+    input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+    input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+    input_ids_pad_wp[:, -1] = input_ids[:, -1]
+    
+    targets = input_ids.clone()
+
+    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+
+    # Mask targets
+    sep = conv.sep + conv.roles[1] + ": "
+    for conversation, target in zip(conversations, targets):
+        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+
+        rounds = conversation.split(conv.sep2)
+        cur_len = 1
+        target[:cur_len] = IGNORE_INDEX
+        for i, rou in enumerate(rounds):
+            if rou == "":
+                break
+
+            parts = rou.split(sep)
+            if len(parts) != 2:
+                break
+            parts[0] += sep
+
+            if has_image:
+                round_len = len(tokenizer_image_token(rou, tokenizer))
+                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+            else:
+                round_len = len(tokenizer(rou).input_ids)
+                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+
+            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+
+            cur_len += round_len
+        target[cur_len:] = IGNORE_INDEX
+
+        if cur_len < tokenizer.model_max_length:
+            if cur_len != total_len:
+                target[:] = IGNORE_INDEX
+
+    targets = targets[:, :tokenizer.model_max_length]
+    # add wp embedding, input_ids[-1] is </s>
+    targets_pad_wp = torch.zeros(targets.shape[0], targets.shape[1] + 1, dtype=torch.long)
+    targets_pad_wp[:, :-2] = targets[:, :-1]
+    targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+    targets_pad_wp[:, -1] = targets[:, -1]
+
+    return dict(
+        input_ids=input_ids_pad_wp,
+        labels=targets_pad_wp,
+        prompt=guided_prompt,
+    )
+    
 def preprocess_imgsp_qwen(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
@@ -670,7 +793,9 @@ def preprocess(
     3. Tokenize the concatenated conversation;
     4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
     """
-    if conversation_lib.default_conversation.version.startswith("imgsp_qwen"):
+    if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
+        return preprocess_imgsp_uav(sources, tokenizer, has_image=has_image, refine_prompt=refine_prompt, eval=eval)
+    elif conversation_lib.default_conversation.version.startswith("imgsp_qwen"):
         return preprocess_imgsp_qwen(sources, tokenizer, has_image=images, refine_prompt=refine_prompt)
     elif conversation_lib.default_conversation.version.startswith("imgsp_llava"):
         return preprocess_imgsp_llava(sources, tokenizer, has_image=images, refine_prompt=refine_prompt, eval=eval)
@@ -686,7 +811,8 @@ class LazySupervisedDataset(Dataset):
     
     def __init__(self, data_path: Union[List[str], str],
                  tokenizer: transformers.PreTrainedTokenizer,
-                 data_args: DataArguments):
+                 data_args: DataArguments, 
+                 r1: bool = False):
         super(LazySupervisedDataset, self).__init__()
         if isinstance(data_path, str):
             data_path = [data_path]
@@ -704,6 +830,7 @@ class LazySupervisedDataset(Dataset):
         if not self.eval:
             random.shuffle(self.list_data_dict)
         self.data_args = data_args
+        self.r1 = r1
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -770,10 +897,11 @@ class LazySupervisedDataset(Dataset):
         bbox = infos['bbox']
         subgoal = infos['subgoal']
         states = self.dataset_state[dataset_name]
-        if self.data_args.r1:
-            states = ['front']
+
         stage = ''
         if dataset_name == 'traveluav':
+            if self.r1:
+                states = ['front']
             traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
             json_path = os.path.join(self.dataset_path, infos['json'])
             with open(json_path, 'r') as f:
@@ -826,8 +954,8 @@ class LazySupervisedDataset(Dataset):
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.data_args.r1:
-                            assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
                         else:
                             assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
                     elif state == "left":
@@ -866,10 +994,10 @@ class LazySupervisedDataset(Dataset):
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
             assist = re.sub(r',\s*$', '.', assist.strip())
-        if dataset_name != "aerialvg" and not self.data_args.r1:
+        if dataset_name != "aerialvg" and not self.r1:
             assist += "\nControl:"
 
-        if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava")  :
+        if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava") or conversation_lib.default_conversation.version.startswith("imgsp_uav"):
             if dataset_name == "traveluav":
                 traj_camera_list = []
                 for idx, camera_name in enumerate(self.RGB_FOLDER):
@@ -888,6 +1016,10 @@ class LazySupervisedDataset(Dataset):
                 image = traj_imgs[(frame_num-1):frame_num][0]
             else:
                 image = [Image.open(image_path).convert('RGB')]
+            if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
+                processor = self.data_args.image_processor
+                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+                image = image.unsqueeze(0).repeat(5, 1, 1, 1) 
         else:
             raise ValueError(
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
@@ -915,6 +1047,7 @@ class LazySupervisedDataset(Dataset):
                 data_dict["labels"] = data_dict["labels"][0]
         
         data_dict['image'] = image
+        data_dict['bbox'] = torch.tensor(bbox).view(-1) if len(bbox)>0 and self.r1 else None
         if dataset_name == "aerialvg":
             return data_dict
         trajectory_data = np.array(ori_sources[0]['trajectory'])
@@ -1019,6 +1152,9 @@ class DataCollatorForSupervisedDataset(object):
         # if 'waypoint' in instances[0]:
         #     batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances])
         #     batch['historys'] = [instance['history_waypoint'] for instance in instances]
+        if any('bbox' in instance for instance in instances):
+            batch['bboxes'] = torch.stack([instance['bbox'] for instance in instances if 'bbox' in instance])
+        
         if any('waypoint' in instance for instance in instances):
             batch['waypoints'] = torch.stack([instance['waypoint'] for instance in instances if 'waypoint' in instance])
             batch['historys'] = [instance['history_waypoint'] for instance in instances if 'history_waypoint' in instance]

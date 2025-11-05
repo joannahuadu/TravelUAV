@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig
 
 from llamavid.model.llamavid_arch import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from llamavid.model.language_model.llama_uav import LlamaUAVModel, LlamaUAVForCausalLM, CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
 
 from llamavid.constants import WAYPOINT_LABEL_TOKEN
@@ -108,8 +109,9 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         historys: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         return_waypoints: Optional[bool] = False,
+        cot_eval: Optional[bool] = False,
         **kwargs,
-    ) -> Union[Tuple, CausalLMOutputWithPastUAV]:
+    ) -> Union[CausalLMOutputWithPast, Tuple, CausalLMOutputWithPastUAV]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -124,9 +126,9 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
                     images = [image.to(device=self.device) for image in images]
             if input_ids.device != self.device:
                 input_ids = input_ids.to(device=self.device)
-            if attention_mask.device != self.device:
+            if attention_mask is not None and attention_mask.device != self.device:
                 attention_mask = attention_mask.to(device=self.device)
-            if labels.device != self.device:
+            if labels is not None and labels.device != self.device:
                 labels = labels.to(device=self.device)
                 
         # import ipdb; ipdb.set_trace()
@@ -137,11 +139,15 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         
         history_embeds = []
         
-        for idx in range(len(historys)):
-            history = historys[idx]
-            info = history.view(-1, 3)
-            history_embed = self.history_preprocessor(info)
-            history_embeds.append(history_embed)
+        if historys is not None:
+            for idx in range(len(historys)):
+                history = historys[idx]
+                info = history.view(-1, 3)
+                history_embed = self.history_preprocessor(info)
+                history_embeds.append(history_embed)
+        else:
+            for idx in range(len(images)):
+                history_embeds.append(torch.zeros((1, 4096)))
             
         input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, historys=history_embeds, special_token_dict=self.special_token_dict)
         inputs_embeds = inputs_embeds.to(dtype=self.waypoint_emb.weight.dtype)
@@ -180,6 +186,16 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
         
         if return_waypoints:
             return loss, predicted_waypoints
+        
+        if cot_eval:
+            logits = self.lm_head(hidden_states)
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
         
         if not return_dict:
             output = (waypoints_feat,) + outputs[1:]
