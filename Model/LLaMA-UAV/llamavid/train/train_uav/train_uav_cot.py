@@ -770,6 +770,8 @@ class LazySupervisedDataset(Dataset):
         bbox = infos['bbox']
         subgoal = infos['subgoal']
         states = self.dataset_state[dataset_name]
+        if self.data_args.r1:
+            states = ['front']
         stage = ''
         if dataset_name == 'traveluav':
             traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
@@ -824,7 +826,10 @@ class LazySupervisedDataset(Dataset):
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
+                        if self.data_args.r1:
+                            assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                        else:
+                            assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
                     elif state == "left":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
@@ -861,7 +866,7 @@ class LazySupervisedDataset(Dataset):
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
             assist = re.sub(r',\s*$', '.', assist.strip())
-        if dataset_name != "aerialvg":
+        if dataset_name != "aerialvg" and not self.data_args.r1:
             assist += "\nControl:"
 
         if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava")  :

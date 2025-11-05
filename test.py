@@ -604,10 +604,10 @@
 # # print(data['conversations'])
 
 import torch
-a = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128_5e-5/mm_projector.bin")
-b = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128_5e-5/checkpoint-6686/mm_projector.bin")
-c = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128_5e-5/mm_projector/checkpoint-6686.bin")
-d = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128_1e-4/non_lora_trainables.bin")
+a = torch.load("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/llava_next-pretrain-cot-uav-full-data-lora64_bs128_aerialvg/mm_projector.bin")
+b = torch.load("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/llava_next-pretrain-cot-uav-full-data-lora64_bs128_aerialvg/checkpoint-100/mm_projector.bin")
+c = torch.load("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/llava_next-pretrain-cot-uav-full-data-lora64_bs128_aerialvg/mm_projector/checkpoint-100.bin")
+d = torch.load("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/llava_next-pretrain-cot-uav-full-data-lora64_bs128_aerialvg/non_lora_trainables.bin")
 # d = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128/checkpoint-6686/mm_projector_1.bin")
 # e = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128/checkpoint-6686/mm_projector.bin")
 # f = torch.load("/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/work_dirs/qwen_2_5_vl-pretrain-252-uav-full-data-lora64_bs128/mm_projector/checkpoint-6686.bin")
@@ -622,8 +622,8 @@ print(d.keys())
 # print(len(e.keys()))
 # print(e.keys())
 
-print(torch.sum(a["base_model.model.waypoint_emb.weight"] == d["base_model.model.waypoint_emb.weight"]))
-print(d["base_model.model.waypoint_emb.weight"].shape.numel())
+print(torch.sum(a["base_model.model.model.language_model.embed_tokens.weight"] == c["base_model.model.model.language_model.embed_tokens.weight"]))
+print(c["base_model.model.model.language_model.embed_tokens.weight"].shape.numel())
 
 # # print(len(c.keys()))
 

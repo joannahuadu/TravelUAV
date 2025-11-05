@@ -6,7 +6,7 @@ import os
 # ======= 配置输入/输出路径 =======
 jsonl_path = Path("/home/fit/qiuhan/WORK/wmq/Visual-CoT/jobs/1027/traveluav_cot_train_20.jsonl")  # 第一个：jsonl，每行一个样本
 pairs_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/uav_dataset/trainset.json")   # 第二个：json 列表，每个元素含 {"json": "...", "frame": N}
-out_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/cot_uav_dataset/traveluav_trainset_20_1028.json")  # 输出：json 列表
+out_path = Path("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/data/cot_uav_dataset/traveluav_trainset_20_1104_onlycot.json")  # 输出：json 列表
 
 # ======= 工具函数 =======
 SUBGOAL_RE = re.compile(r"Subgoal:\s*(.+?)(?:[。\.]\s*|$)", flags=re.IGNORECASE | re.DOTALL)
@@ -89,17 +89,18 @@ for idx, (row, pair) in enumerate(zip(jsonl_rows, pairs[:len(jsonl_rows)])):
     new_entry["subgoal"] = subgoal_text
     new_entry["bbox"] = bbox
     new_entry["dataset"] = row.get("dataset")
-    merged.append(new_entry)
+    if subgoal_text != "":
+        merged.append(new_entry)
 
-# ======= 把剩余 pairs 也写入，补空的 subgoal/bbox/dataset =======
-for tail_idx, pair in enumerate(pairs[len(jsonl_rows):], start=len(jsonl_rows)):
-    merged.append({
-        "json": pair.get("json"),
-        "frame": pair.get("frame"),
-        "subgoal": "",
-        "bbox": {},
-        "dataset": "traveluav"
-    })
+# # ======= 把剩余 pairs 也写入，补空的 subgoal/bbox/dataset =======
+# for tail_idx, pair in enumerate(pairs[len(jsonl_rows):], start=len(jsonl_rows)):
+#     merged.append({
+#         "json": pair.get("json"),
+#         "frame": pair.get("frame"),
+#         "subgoal": "",
+#         "bbox": {},
+#         "dataset": "traveluav"
+#     })
 
 # ======= 写出结果 =======
 with out_path.open("w", encoding="utf-8") as f:
