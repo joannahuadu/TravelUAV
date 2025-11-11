@@ -195,6 +195,10 @@ class DataArguments:
         })
     bbox_scale: bool = field(default=False)
     use_assist: bool = field(default=False)
+    visual_assist: bool = field(default=False)
+    r1: bool = field(default=False)
+    r1_gen: bool = field(default=False)
+    r2: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -434,21 +438,25 @@ def preprocess_multimodal(
     
     prefix = "Navigation goal: "
     suffix = "\n"
+    if data_args.r1_gen or data_args.r1:
+        img_prefix = "Given one current image <image>\n. "
+    else:
+        img_prefix = "These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
     if dataset_name == "traveluav":
         if data_args.use_assist:
-            prefix = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + "\n\nInstruction:These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
+            prefix = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + "\n\nInstruction:" + img_prefix
         else:
-            prefix = "\n\nInstruction:These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
+            prefix = "\n\nInstruction:" + img_prefix
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
         if eval:
             suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target. ASSISTANT: Subgoal:"
     elif dataset_name == "airvln":
-        prefix = "\n\nInstruction:Given one current image.<image>\n"
+        prefix = "\n\nInstruction:Given one current image <image>\n. "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
     elif dataset_name == "aerialvg":
-        prefix = "\n\nInstruction:Given one current image.<image>\n"
+        prefix = "\n\nInstruction:Given one current image <image>\n. "
         suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
         if eval:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). ASSISTANT: Subgoal:"
@@ -707,6 +715,7 @@ def preprocess_imgsp_llava(
     eval: bool = False,
 ) -> Dict:
     processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/llava-v1.6-vicuna-7b-hf")
+    processor.tokenizer = tokenizer 
     system_message = {
         "role": "system",
         "content": [
@@ -812,7 +821,9 @@ class LazySupervisedDataset(Dataset):
     def __init__(self, data_path: Union[List[str], str],
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments, 
-                 r1: bool = False):
+                 r1: bool = False, 
+                 r1_gen: bool = False, 
+                 r2: bool = False):
         super(LazySupervisedDataset, self).__init__()
         if isinstance(data_path, str):
             data_path = [data_path]
@@ -831,6 +842,8 @@ class LazySupervisedDataset(Dataset):
             random.shuffle(self.list_data_dict)
         self.data_args = data_args
         self.r1 = r1
+        self.r1_gen = r1_gen
+        self.r2 = r2
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -851,7 +864,43 @@ class LazySupervisedDataset(Dataset):
             cur_len = cur_len if ('image' in sample) or ('video' in sample) else -cur_len
             length_list.append(cur_len)
         return length_list
+    
+    def get_visual_stage(self, bbox):
+        box = bbox['front']
+        x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
 
+        def bucket(v):
+            if v < 1/3: 
+                return 0
+            elif v < 2/3: 
+                return 1
+            else: 
+                return 2
+
+        col = bucket(cx)  # 0 L, 1 C, 2 R
+        row = bucket(cy)  # 0 U, 1 C, 2 D 
+
+        if row == 1 and col == 1:
+            return 'cruise'
+        elif row == 1 and col == 0:
+            return 'left'
+        elif row == 1 and col == 2:
+            return 'right'
+        elif row == 0 and col == 1:
+            return 'take off'
+        elif row == 2 and col == 1:
+            return 'landing'
+        elif row == 0 and col == 0:
+            return 'take off and left'
+        elif row == 0 and col == 2:
+            return 'take off and right'
+        elif row == 2 and col == 0:
+            return 'landing and left'
+        elif row == 2 and col == 2:
+            return 'landing and right'
+            
     def get_stage(self, trajectory, frame_num):
         def turning_stage(p0,p1,p2):
             prev_vec = p1 - p0
@@ -899,9 +948,16 @@ class LazySupervisedDataset(Dataset):
         states = self.dataset_state[dataset_name]
 
         stage = ''
+        image_idx = 0
         if dataset_name == 'traveluav':
-            if self.r1:
-                states = ['front']
+            if self.r1 or self.r1_gen or self.r2:
+                # states = ['front']
+                # if isinstance(bbox, dict):
+                #     bbox = {k: v for k, v in bbox.items() if k in states}
+                if isinstance(bbox, dict) and len(bbox) > 0:
+                    first_key = next(iter(bbox))
+                    bbox = {first_key: bbox[first_key]}
+                    image_idx = self.RGB_FOLDER.index(f'{first_key}camera')
             traj_dir = os.path.join(self.dataset_path, *infos['json'].split('/')[:-1])
             json_path = os.path.join(self.dataset_path, infos['json'])
             with open(json_path, 'r') as f:
@@ -928,6 +984,11 @@ class LazySupervisedDataset(Dataset):
             else:
                 future_delta_str = None
                 cur_pos_str = None
+            if self.r2 and self.data_args.visual_assist:
+                if image_idx==0 and 'front' in bbox:
+                    stage = self.get_visual_stage(bbox)
+                else:
+                    stage, _, _ = self.get_stage(sources[0]['trajectory'], frame_num)
                 
         elif dataset_name == 'aerialvg':
             image_path = infos['json']
@@ -956,46 +1017,84 @@ class LazySupervisedDataset(Dataset):
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
                         if self.r1:
                             assist += "<bbox_2d>"
+                            bbox = bbox[state]
                         else:
-                            assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
+                            if self.r1_gen or self.r2:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                            else:
+                                assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
                     elif state == "left":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
+                            bbox = bbox[state]
+                        else:
+                            if self.r1_gen or self.r2:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                            else:
+                                assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
                     elif state == "right":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
+                            bbox = bbox[state]
+                        else:
+                            if self.r1_gen or self.r2:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                            else:
+                                assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
                     elif state == "rear":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
+                            bbox = bbox[state]
+                        else:
+                            if self.r1_gen or self.r2:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                            else:
+                                assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
                     elif state == "down":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
+                            bbox = bbox[state]
+                        else:
+                            if self.r1_gen or self.r2:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                            else:
+                                assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
                     elif state == "current":
                         if self.data_args.bbox_scale:
                             bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
                             bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                         else:
                             bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                        if self.r1:
+                            assist += "<bbox_2d>"
+                            bbox = bbox[state]
+                        else:
+                            assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
             assist = re.sub(r',\s*$', '.', assist.strip())
-        if dataset_name != "aerialvg" and not self.r1:
+        if dataset_name != "aerialvg" and not self.r1 and not self.r1_gen:
             assist += "\nControl:"
+            if self.r2 and self.data_args.visual_assist:
+                assist += f"{stage}"
 
         if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava") or conversation_lib.default_conversation.version.startswith("imgsp_uav"):
             if dataset_name == "traveluav":
@@ -1014,6 +1113,8 @@ class LazySupervisedDataset(Dataset):
                     images = [Image.open(img_path).convert('RGB') for img_path in frame_imgs]
                     traj_imgs.append(images)
                 image = traj_imgs[(frame_num-1):frame_num][0]
+                if self.r1_gen:
+                    image = [image[image_idx]]
             else:
                 image = [Image.open(image_path).convert('RGB')]
             if conversation_lib.default_conversation.version.startswith("imgsp_uav"):
@@ -1026,7 +1127,7 @@ class LazySupervisedDataset(Dataset):
             )
         sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args, assist, dataset_name, eval=self.eval, stage=stage, delta = future_delta_str, cur = cur_pos_str)
-                
+        # print(sources[0][0]['value'][:50], sources[0][1]['value'])
         has_image = (image is not None)
         data_dict = preprocess(
             sources,
@@ -1047,8 +1148,15 @@ class LazySupervisedDataset(Dataset):
                 data_dict["labels"] = data_dict["labels"][0]
         
         data_dict['image'] = image
-        data_dict['bbox'] = torch.tensor(bbox).view(-1) if len(bbox)>0 and self.r1 else None
-        if dataset_name == "aerialvg":
+        if self.eval:
+            data_dict['view'] = image_idx
+        if not self.eval:
+            if len(bbox)>0 and self.r1:
+                try:
+                    data_dict['bbox'] = torch.tensor(bbox).view(-1)
+                except:
+                    print("wrong bbox: ", bbox, infos)
+        if dataset_name == "aerialvg" or self.r1 or self.r1_gen:
             return data_dict
         trajectory_data = np.array(ori_sources[0]['trajectory'])
         history_waypoint = trajectory_data[0:frame_num, 0:3]
@@ -1175,7 +1283,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
                                 data_path=data_args.data_path,
-                                data_args=data_args)
+                                data_args=data_args, r1=data_args.r1, r1_gen=data_args.r1_gen, r2=data_args.r2)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
@@ -1339,9 +1447,9 @@ def train():
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
     
-    smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<his>'], tokenizer=tokenizer, model=model)
+    smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<bbox_2d>'], tokenizer=tokenizer, model=model)
     
-    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<his>': tokenizer.encode('<his>', add_special_tokens=False)[0],
+    model.get_special_token_id({'<wp>': tokenizer.encode('<wp>', add_special_tokens=False)[0], '<bbox_2d>': tokenizer.encode('<bbox_2d>', add_special_tokens=False)[0],
                                 ',': tokenizer.encode(',', add_special_tokens=False)[0], ';': tokenizer.encode(';', add_special_tokens=False)[0]})
 
     # smarter_tokenizer_and_embedding_resize(special_tokens_list=['<wp>', '<bbox_2d_front>', '<bbox_2d_left>', '<bbox_2d_right>', '<bbox_2d_rear>', '<bbox_2d_down>', '<bbox_2d>'], tokenizer=tokenizer, model=model)
@@ -1381,6 +1489,8 @@ def train():
         for p in model.waypoints_output.parameters():
             p.requires_grad = True
         for p in model.history_preprocessor.parameters():
+            p.requires_grad = True
+        for p in model.bbox_head.parameters():
             p.requires_grad = True
 
     for name, param in model.named_parameters():

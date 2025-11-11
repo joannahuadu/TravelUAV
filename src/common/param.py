@@ -80,6 +80,8 @@ class DataArguments:
     bbox_scale: bool = field(default=False)
     cot_eval: bool = field(default=False)
     use_assist: bool = field(default=False)
+    r1: bool = field(default=False)
+    r1_gen: bool = field(default=False)
     
 @dataclass
 class ModelArguments:
