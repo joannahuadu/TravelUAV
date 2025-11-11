@@ -23,9 +23,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, LlavaNextConfig, Llav
 from transformers.modeling_outputs import ModelOutput
 
 from llamavid.model.language_model.llama_uav import CausalLMOutputWithPastUAV, CausalLMOutputWithPastUAVMulLoss
-from llamavid.constants import WAYPOINT_LABEL_TOKEN, WAYPOINT_INPUT_TOKEN_LLAVA 
+from llamavid.constants import WAYPOINT_LABEL_TOKEN, WAYPOINT_INPUT_TOKEN_LLAVA, BBOX_INPUT_TOKEN_LLAVA
 
 from transformers.utils import is_torchdynamo_compiling
+import math
 
 @dataclass
 class LlavaNextCausalLMOutputWithPast(ModelOutput):
@@ -47,6 +48,51 @@ class CosineDirectionLoss(nn.Module):
         cosine_sim = F.cosine_similarity(vec1, vec2, dim=-1)
         loss = 1 - cosine_sim
         return loss.mean()
+
+class CIoULoss(nn.Module):
+    def __init__(self, reduction='sum'):
+        super().__init__()
+        assert reduction in ('none', 'mean', 'sum')
+        self.reduction = reduction
+
+    def forward(self, pred, target, eps=1e-7):
+        px1, py1, px2, py2 = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
+        tx1, ty1, tx2, ty2 = target[:, 0], target[:, 1], target[:, 2], target[:, 3]
+
+        p_area = (px2 - px1).clamp(min=0) * (py2 - py1).clamp(min=0)
+        t_area = (tx2 - tx1).clamp(min=0) * (ty2 - ty1).clamp(min=0)
+
+        inter_w = (torch.min(px2, tx2) - torch.max(px1, tx1)).clamp(min=0)
+        inter_h = (torch.min(py2, ty2) - torch.max(py1, ty1)).clamp(min=0)
+        inter_area = inter_w * inter_h
+
+        union = p_area + t_area - inter_area + eps
+        iou = inter_area / union
+
+        cw = (torch.max(px2, tx2) - torch.min(px1, tx1)).clamp(min=eps)
+        ch = (torch.max(py2, ty2) - torch.min(py1, ty1)).clamp(min=eps)
+        c2 = cw**2 + ch**2 + eps 
+
+        rho2 = (( (px1 + px2) - (tx1 + tx2) )**2 +
+                ( (py1 + py2) - (ty1 + ty2) )**2) / 4.0
+
+        pw = (px2 - px1).clamp(min=eps)
+        ph = (py2 - py1).clamp(min=eps)
+        tw = (tx2 - tx1).clamp(min=eps)
+        th = (ty2 - ty1).clamp(min=eps)
+
+        v = (4 / (math.pi**2)) * torch.pow(torch.atan(tw / th) - torch.atan(pw / ph), 2)
+        with torch.no_grad():
+            alpha = v / (1 - iou + v + eps)
+
+        ciou = iou - (rho2 / c2 + alpha * v)
+        loss = 1 - ciou.clamp(min=-1.0, max=1.0)
+
+        if self.reduction == 'mean':
+            loss = loss.mean()
+        elif self.reduction == 'sum':
+            loss = loss.sum()
+        return loss
 
 class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
     _checkpoint_conversion_mapping = {
@@ -94,7 +140,19 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
         # self.actions_loss_func = torch.nn.CrossEntropyLoss()
         # self.action_loss_scale = 1.0
         ## bbox
+        self.bbox_head = nn.Sequential(
+            nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size // 2, bias=True),
+            nn.ReLU(inplace=True),
+            # nn.Dropout(dropout),
 
+            nn.Linear(config.text_config.hidden_size//2, 64, bias=True),
+            nn.ReLU(inplace=True),
+            # nn.Dropout(dropout),
+
+            nn.Linear(64, 4, bias=True)  # 输出4个值
+        )
+        self.bbox_loss_scale = 0.5
+        self.bbox_loss_func = CIoULoss(reduction='sum')
         # Initialize weights and apply final processing
         self.post_init()
     
@@ -118,11 +176,11 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
     #     predicted_actions = self.actions_output(actions_feature)
     #     return predicted_actions
     
-    # def forward_bbox(self, hidden_states):
-    #     bs, hidden_size = hidden_states.size()
-    #     ## TODO: wmq bbox regression head.
-    #     predicted_bboxes = 0
-    #     return predicted_bboxes
+    def forward_bbox(self, hidden_states):
+        bs, hidden_size = hidden_states.size()
+        predicted_bboxes = self.bbox_head(hidden_states.reshape(-1, hidden_size))
+        predicted_bboxes = torch.sigmoid(predicted_bboxes)  
+        return predicted_bboxes
 
     def forward(
         self,
@@ -242,9 +300,9 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
         # if actions is not None:
         #     actions_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
         #     predicted_actions = self.forward_action(actions_feat)
-        # if bboxes is not None:
-        #     bboxes_feat = hidden_states[labels == BBOX_LABEL_TOKEN]
-        #     predicted_bboxes = self.forward_waypoint(bboxes_feat)
+        bboxes_feat = hidden_states[labels == BBOX_INPUT_TOKEN_LLAVA]
+        if len(bboxes_feat):    
+            predicted_bboxes = self.forward_bbox(bboxes_feat)
         
         if waypoints is None and return_waypoints:
             return predicted_waypoints
@@ -269,6 +327,11 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
             mask_shifted[..., 1:] = mask[..., :-1]
             shift_labels = shift_labels.masked_fill(mask_shifted, torch.tensor(-100, device=shift_labels.device, dtype=shift_labels.dtype))
             
+            mask = (shift_labels == BBOX_INPUT_TOKEN_LLAVA)
+            mask_shifted = torch.zeros_like(mask)
+            mask_shifted[..., 1:] = mask[..., :-1]
+            shift_labels = shift_labels.masked_fill(mask_shifted, torch.tensor(-100, device=shift_labels.device, dtype=shift_labels.dtype))
+            
             # assert shift_labels.dtype == torch.long
             # Flatten the tokens
             # loss_fct = CrossEntropyLoss()
@@ -287,9 +350,9 @@ class LlavaNextCOTUAVForCausalLM(LlavaNextForConditionalGeneration):
                 loss += waypoint_loss + angle_loss
             else:
                 loss += self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints, waypoints) 
-        # if bboxes is not None:
-        #     ## TODO: wmq bboxes regression loss
-        #     pass
+        if bboxes is not None:
+            assert len(torch.where(labels == BBOX_INPUT_TOKEN_LLAVA)[0]) == bboxes.shape[0]
+            loss += self.bbox_loss_scale * self.bbox_loss_func(predicted_bboxes, bboxes)
         # if actions is not None:
         #     loss += self.action_loss_scale * self.actions_loss_func(predicted_actions, actions) 
         
