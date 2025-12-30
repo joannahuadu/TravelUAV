@@ -58,7 +58,7 @@ def load_pretrained_model(model_path, model_base, model_name, args, load_8bit=Fa
     else:
         kwargs['torch_dtype'] = torch.bfloat16
 
-    if 'vid' in model_name.lower() or 'uav' in model_name.lower() or 'cot' in model_name.lower():
+    if 'vid' in model_name.lower() or 'uav' in model_name.lower() or 'cot' in model_name.lower() or 'our' in model_name.lower():
         # Load LLaMA-VID model
         if model_base is not None:
             # this may be mm projector only
