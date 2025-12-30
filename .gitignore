@@ -49,3 +49,5 @@ traj*
 *.pth
 jobs/*
 fig/*
+*.json
+*.jsonl

@@ -7,18 +7,29 @@ from llamavid import conversation as conversation_lib
 from transformers import CLIPImageProcessor
 STOP_STR = "\nControl:" 
 def decode_until_control(model, tokenizer, inputs,
-                        max_new_tokens=256,
+                        max_new_tokens=80,
                         temperature=0.0,
                         top_p=1.0,
-                        stop_str=STOP_STR):
+                        stop_str=STOP_STR, 
+                        visual_ass = False):
+    # # --- 计时设置 ---
+    # token_times_ms = [] # 存储每个token的耗时 (毫秒)
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
     generated_text = tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
     new_text = ""
     hit_stop = False
+    count = 0
     with torch.no_grad():
         out = model(**inputs, cot_eval=True, use_cache=True)
         past = out.past_key_values
         cur_input_ids = inputs["input_ids"][:, -1:]
-        for _ in range(max_new_tokens):
+        i = 0 
+        while True:
+            i+=1
+            if i >= max_new_tokens:
+                break
+            start_event.record()
             out = model(input_ids=cur_input_ids, past_key_values=past, use_cache=True, cot_eval=True)
             logits = out.logits[:, -1, :]
             past = out.past_key_values
@@ -37,13 +48,23 @@ def decode_until_control(model, tokenizer, inputs,
                     next_token_id = torch.multinomial(probs, num_samples=1)
             else:
                 next_token_id = torch.argmax(logits, dim=-1, keepdim=True)
-
+            # --- 结束计时 ---
+            end_event.record()
+            torch.cuda.synchronize() # 等待 GPU 完成
+            print(f"1-reasoning time: {start_event.elapsed_time(end_event)} ms")
+            # token_times_ms.append(start_event.elapsed_time(end_event))
             tok_text = tokenizer.decode(next_token_id[0], skip_special_tokens=True)
-
             if stop_str in generated_text:
-                generated_text += tok_text
-                new_text += tok_text
-                break
+                if not visual_ass:
+                    generated_text += tok_text
+                    new_text += tok_text
+                    break
+                else:
+                    count+=1
+                    if count==1:
+                        print("tokens:", max_new_tokens)
+                        max_new_tokens = i + 5
+                    
             
             generated_text += tok_text
             new_text += tok_text
@@ -124,6 +145,8 @@ class TravelModelWrapper(BaseModelWrapper):
         #             max_new_tokens=50,
         #             cot_eval = True,
         #         )
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         _, new_outputs, input_ids, past = decode_until_control(self.model, self.tokenizer, inputs)
         print("CoT Text: ", new_outputs)
         input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
@@ -136,8 +159,44 @@ class TravelModelWrapper(BaseModelWrapper):
         targets_pad_wp[:, :-2] = labels[:, :-1]
         targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
         targets_pad_wp[:, -1] = labels[:, -1]
-
+        
+        start_event.record()
         waypoints_llm = self.model(input_ids=input_ids_pad_wp, labels=targets_pad_wp, past_key_values=past, use_cache=True, return_waypoints=True).cpu().to(dtype=torch.float32).numpy()
+        end_event.record()
+        torch.cuda.synchronize()
+        print(f"2-acting time: {start_event.elapsed_time(end_event)} ms")
+        waypoints_llm_new = []
+        for waypoint in waypoints_llm:
+            waypoint_new = waypoint[:3] / (1e-6 + np.linalg.norm(waypoint[:3])) * waypoint[3]
+            waypoints_llm_new.append(waypoint_new)
+        refined_waypoints = self.run_traj_model(episodes, np.array(waypoints_llm_new), rot_to_targets)
+        return refined_waypoints
+
+    def run_cot_with_vass(self, inputs, episodes, rot_to_targets):
+        # outputs = self.model.generate(
+        #             **inputs,
+        #             max_new_tokens=50,
+        #             cot_eval = True,
+        #         )
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        _, new_outputs, input_ids, past = decode_until_control(self.model, self.tokenizer, inputs, visual_ass=True)
+        print("CoT Text: ", new_outputs)
+        input_ids_pad_wp = torch.zeros(input_ids.shape[0], input_ids.shape[1] + 1, dtype=torch.long)
+        input_ids_pad_wp[:, :-2] = input_ids[:, :-1]
+        input_ids_pad_wp[:, -2] = WAYPOINT_INPUT_TOKEN
+        input_ids_pad_wp[:, -1] = input_ids[:, -1]
+
+        labels = torch.full_like(input_ids, IGNORE_INDEX)
+        targets_pad_wp = torch.zeros(labels.shape[0], labels.shape[1] + 1, dtype=torch.long)
+        targets_pad_wp[:, :-2] = labels[:, :-1]
+        targets_pad_wp[:, -2] = WAYPOINT_LABEL_TOKEN
+        targets_pad_wp[:, -1] = labels[:, -1]
+        start_event.record()
+        waypoints_llm = self.model(input_ids=input_ids_pad_wp, labels=targets_pad_wp, past_key_values=past, use_cache=True, return_waypoints=True).cpu().to(dtype=torch.float32).numpy()
+        end_event.record()
+        torch.cuda.synchronize()
+        print(f"2-acting time: {start_event.elapsed_time(end_event)} ms")
         waypoints_llm_new = []
         for waypoint in waypoints_llm:
             waypoint_new = waypoint[:3] / (1e-6 + np.linalg.norm(waypoint[:3])) * waypoint[3]
