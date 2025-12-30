@@ -52,6 +52,7 @@ from transformers import AutoProcessor
 import re
 from peft import PeftModel
 from safetensors.torch import load_file
+import tqdm
 logger = logging.get_logger(__name__)
 
 local_rank = None
@@ -199,6 +200,7 @@ class DataArguments:
     r1: bool = field(default=False)
     r1_gen: bool = field(default=False)
     r2: bool = field(default=False)
+    r1_os: bool = field(default=False)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -441,25 +443,35 @@ def preprocess_multimodal(
     if data_args.r1_gen or data_args.r1:
         img_prefix = "Given one current image <image>\n. "
     else:
-        img_prefix = "These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
+        # img_prefix = "These five images respectively come from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
+        img_prefix = "Given five current images from five perspectives: <image>\nfront, <image>\nleft, <image>\nright, <image>\nrear, <image>\ndown. "
     if dataset_name == "traveluav":
         if data_args.use_assist:
             prefix = '\n\nStage:' + stage + '\n\nPrevious displacement:' + delta  + '\n\nCurrent position:' + cur + "\n\nInstruction:" + img_prefix
         else:
             prefix = "\n\nInstruction:" + img_prefix
         if "Subgoal" in assist:
-            suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target."
+            if not data_args.r1_os:
+                suffix = "\nPlease identify useful subgoals and their bounding boxes in the current images. Then control the drone and find the target."
+            else:
+                suffix = "\nPlease identify useful subgoals in the current images to find the final target."
         if eval:
-            suffix = "\nPlease identify useful subgoals and their bounding boxes in each image (if any). Then control the drone and find the target. ASSISTANT: Subgoal:"
+            if not data_args.r1_os:
+                suffix = "\nPlease identify useful subgoals and their bounding boxes in the current images. Then control the drone and find the target. ASSISTANT: Subgoal:"
+            else:
+                suffix = "\nPlease identify useful subgoals in the current images to find the final target. ASSISTANT: Subgoal:"
     elif dataset_name == "airvln":
         prefix = "\n\nInstruction:Given one current image <image>\n. "
         if "Subgoal" in assist:
             suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). Then control the drone and find the target."
     elif dataset_name == "aerialvg":
         prefix = "\n\nInstruction:Given one current image <image>\n. "
-        suffix = "\nPlease identify useful subgoals and their bounding boxes (if any)."
+        if not data_args.r1_os:
+            suffix = "\nPlease identify useful subgoals and their bounding boxes in the current image."
+        else:
+            suffix = "\nPlease identify useful subgoals in the current image to find the final target."
         if eval:
-            suffix = "\nPlease identify useful subgoals and their bounding boxes (if any). ASSISTANT: Subgoal:"
+            suffix = "\nPlease identify useful subgoals and their bounding boxes in the current image. ASSISTANT: Subgoal:"
     else:
         raise ValueError(
                 f"Unsupported conversation version: {conversation_lib.default_conversation.version}"
@@ -823,7 +835,8 @@ class LazySupervisedDataset(Dataset):
                  data_args: DataArguments, 
                  r1: bool = False, 
                  r1_gen: bool = False, 
-                 r2: bool = False):
+                 r2: bool = False,
+                 r1_os: bool = False):
         super(LazySupervisedDataset, self).__init__()
         if isinstance(data_path, str):
             data_path = [data_path]
@@ -838,12 +851,22 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.eval = getattr(data_args, "cot_eval", False)
-        if not self.eval:
-            random.shuffle(self.list_data_dict)
         self.data_args = data_args
         self.r1 = r1
         self.r1_gen = r1_gen
         self.r2 = r2
+        self.r1_os = r1_os
+        if self.r2:
+            real_data = []
+            pseudo_data = []
+            for item in tqdm.tqdm(self.list_data_dict):
+                if item.get('pseudo', False):
+                    pseudo_data.append(item)
+                else:
+                    real_data.append(item)
+            self.list_data_dict = pseudo_data + (real_data * 10)
+        if not self.eval:
+            random.shuffle(self.list_data_dict)
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -891,15 +914,15 @@ class LazySupervisedDataset(Dataset):
         elif row == 0 and col == 1:
             return 'take off'
         elif row == 2 and col == 1:
-            return 'landing'
+            return 'cruise'
         elif row == 0 and col == 0:
-            return 'take off and left'
+            return 'left and take off'
         elif row == 0 and col == 2:
-            return 'take off and right'
+            return 'right and take off'
         elif row == 2 and col == 0:
-            return 'landing and left'
+            return 'left'
         elif row == 2 and col == 2:
-            return 'landing and right'
+            return 'right'
             
     def get_stage(self, trajectory, frame_num):
         def turning_stage(p0,p1,p2):
@@ -945,6 +968,7 @@ class LazySupervisedDataset(Dataset):
         frame_num = infos['frame']
         bbox = infos['bbox']
         subgoal = infos['subgoal']
+        pseudo = infos.get('pseudo', False)
         states = self.dataset_state[dataset_name]
 
         stage = ''
@@ -987,6 +1011,10 @@ class LazySupervisedDataset(Dataset):
             if self.r2 and self.data_args.visual_assist:
                 if image_idx==0 and 'front' in bbox:
                     stage = self.get_visual_stage(bbox)
+                elif image_idx==1 and 'left' in bbox:
+                    stage = 'left'
+                elif image_idx==2 and 'right' in bbox:
+                    stage = 'right'
                 else:
                     stage, _, _ = self.get_stage(sources[0]['trajectory'], frame_num)
                 
@@ -1007,91 +1035,92 @@ class LazySupervisedDataset(Dataset):
         if subgoal != "":
             # TODO: wmq! convert_to_qwen25vl_format and llava_next_format. image rescale.
             assist += f"Subgoal: {subgoal}."
-            for state in states:
-                if state in bbox:
-                    if state == "front":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            if self.r1_gen or self.r2:
-                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+            if not self.r1_os:
+                for state in states:
+                    if state in bbox:
+                        if state == "front":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                             else:
-                                assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
-                    elif state == "left":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            if self.r1_gen or self.r2:
-                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
                             else:
-                                assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
-                    elif state == "right":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            if self.r1_gen or self.r2:
-                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                if self.r1_gen or self.r2:
+                                    assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                else:
+                                    assist += f"{{\n\"bbox_2d_front\": {bbox_formatted}\n}}, "
+                        elif state == "left":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                             else:
-                                assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
-                    elif state == "rear":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            if self.r1_gen or self.r2:
-                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
                             else:
-                                assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
-                    elif state == "down":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            if self.r1_gen or self.r2:
-                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                if self.r1_gen or self.r2:
+                                    assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                else:
+                                    assist += f"{{\n\"bbox_2d_left\": {bbox_formatted}\n}}, "
+                        elif state == "right":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
                             else:
-                                assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
-                    elif state == "current":
-                        if self.data_args.bbox_scale:
-                            bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
-                            bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
-                        else:
-                            bbox_formatted = [round(float(v), 4) for v in bbox[state]]
-                        if self.r1:
-                            assist += "<bbox_2d>"
-                            bbox = bbox[state]
-                        else:
-                            assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
-            assist = re.sub(r',\s*$', '.', assist.strip())
-        if dataset_name != "aerialvg" and not self.r1 and not self.r1_gen:
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
+                            else:
+                                if self.r1_gen or self.r2:
+                                    assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                else:
+                                    assist += f"{{\n\"bbox_2d_right\": {bbox_formatted}\n}}, "
+                        elif state == "rear":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                            else:
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
+                            else:
+                                if self.r1_gen or self.r2:
+                                    assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                else:
+                                    assist += f"{{\n\"bbox_2d_rear\": {bbox_formatted}\n}}, "
+                        elif state == "down":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                            else:
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
+                            else:
+                                if self.r1_gen or self.r2:
+                                    assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                                else:
+                                    assist += f"{{\n\"bbox_2d_down\": {bbox_formatted}\n}}, "
+                        elif state == "current":
+                            if self.data_args.bbox_scale:
+                                bbox_formatted = [round(bbox[state][i] * (width if i % 2 == 0 else height)) for i in range(4)]
+                                bbox_formatted = convert_to_qwen25vl_format(bbox_formatted, height, width)
+                            else:
+                                bbox_formatted = [round(float(v), 4) for v in bbox[state]]
+                            if self.r1:
+                                assist += "<bbox_2d>"
+                                bbox = bbox[state]
+                            else:
+                                assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
+                assist = re.sub(r',\s*$', '.', assist.strip())
+        if dataset_name != "aerialvg" and not self.r1 and not self.r1_gen and not self.r1_os:
             assist += "\nControl:"
             if self.r2 and self.data_args.visual_assist:
                 assist += f"{stage}"
@@ -1156,7 +1185,7 @@ class LazySupervisedDataset(Dataset):
                     data_dict['bbox'] = torch.tensor(bbox).view(-1)
                 except:
                     print("wrong bbox: ", bbox, infos)
-        if dataset_name == "aerialvg" or self.r1 or self.r1_gen:
+        if dataset_name == "aerialvg" or self.r1 or self.r1_gen or self.r1_os:
             return data_dict
         trajectory_data = np.array(ori_sources[0]['trajectory'])
         history_waypoint = trajectory_data[0:frame_num, 0:3]
@@ -1181,6 +1210,7 @@ class LazySupervisedDataset(Dataset):
         orientation = trajectory_data[frame_num-1, 3:6]
         data_dict['orientation'] = torch.tensor(orientation).view(-1)
         data_dict['is_help'] = torch.tensor(0).view(-1)
+        data_dict['pseudo'] = pseudo
         
         # prompt exist in the data
         if prompt is not None:
@@ -1283,7 +1313,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
                                 data_path=data_args.data_path,
-                                data_args=data_args, r1=data_args.r1, r1_gen=data_args.r1_gen, r2=data_args.r2)
+                                data_args=data_args, r1=data_args.r1, r1_gen=data_args.r1_gen, r2=data_args.r2, r1_os=data_args.r1_os)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,

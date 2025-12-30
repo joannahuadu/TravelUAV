@@ -60,6 +60,7 @@ class CommonArguments:
     object_name_json_path: Optional[str] = field(default=None)
     map_spawn_area_json_path: Optional[str] = field(default=None)
     eval_split: int = field(default=-1, metadata={"help": "0-4 for 5-fold cross validation, -1 for no split"})
+    idx: int = field(default=-1)
     
 @dataclass
 class DataArguments:
@@ -83,6 +84,7 @@ class DataArguments:
     r1: bool = field(default=False)
     r1_gen: bool = field(default=False)
     visual_assist: bool = field(default=False)
+    r1_os: bool = field(default=False)
     
 @dataclass
 class ModelArguments:
