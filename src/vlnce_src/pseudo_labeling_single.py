@@ -28,9 +28,27 @@ from typing import Optional, Dict, List
 from torch.utils.data import DataLoader
 import re
 
+def detect_bbox_over_five_views(images: Dict[str, str], text_prompt: str, model) -> Tuple[Optional[str], Optional[List[float]]]:
+    bboxes = {}
+    for view in PERSPECTIVES:
+        if view not in images:
+            continue
+        p = images[view]
+        bbox = detect_bbox(p, text_prompt, model)
+        if bbox is not None:
+            bboxes[view] = bbox
+    return bboxes
+
+def load_groundingdino_model(device):
+    cfg = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py"
+    weight = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/src/model_wrapper/utils/GroundingDINO/groundingdino_swinb_cogcoor.pth"
+    model = load_model(cfg, weight)
+    model.to(device=device)
+    return models
+
 
 def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500, r1_gen=False):
-
+    dino = load_groundingdino_model(device)
     os.makedirs(eval_save_dir, exist_ok=True)
     save_file = f"{eval_save_dir}/eval_results.jsonl"
 
@@ -86,36 +104,9 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
                 )
                 outputs[outputs == -200] = 0
             decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            if not "bbox_2d" in decoded_text and r1_gen:
-                image = batch['image']
-                has_image = (image is not None)
-                sources = [[{"from": "human", "value": "<image>\n" + re.sub(r'^.*?USER:\s*', '', decoded_text[0]) + f"{{\n\"bbox_2d\": " }, {"from": "gpt", "value": ""}]]
-                data_dict = preprocess(
-                    sources,
-                    image,
-                    tokenizer,
-                    has_image=has_image,
-                    eval=True)
-                input_ids = data_dict["input_ids"].to(model.device)
-                if 'attention_mask' in data_dict: 
-                    attention_mask = data_dict["attention_mask"].to(model.device)
-                else:
-                    attention_mask=input_ids.ne(tokenizer.pad_token_id).to(model.device)
-
-                if "pixel_values" in data_dict:
-                    pixel_values = data_dict["pixel_values"].to(model.device)
-                    image_sizes = data_dict["image_sizes"].to(model.device)
-                outputs = model.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        pixel_values=pixel_values,
-                        image_sizes=image_sizes,
-                        max_new_tokens=max_new_tokens+100,
-                        cot_eval = True,
-                        use_cache = False,
-                    )
-                decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
+            subgoal = re.sub(r"(?i)^\s*subgoal\s*:\s*", "", decoded_text).strip()
+            images = {"front": batch['image'][0], "left": batch['image'][1], "right": batch['image'][2], "rear": batch['image'][3], "down": batch['image'][4]}
+            bboxes = detect_bbox_over_five_views(images, subgoal, dino)
             f.write(str(batch['view'])+ "--")
             for text in decoded_text:
                 f.write(json.dumps(text, ensure_ascii=False) + "\n")
@@ -136,7 +127,8 @@ if __name__ == "__main__":
                                 data_path=data_args.data_path,
                                 data_args=data_args, 
                                 r1=data_args.r1, 
-                                r1_gen=data_args.r1_gen)
+                                r1_gen=data_args.r1_gen,
+                                labeling=data_args.labeling)
     
     eval(model_wrapper=model_wrapper,
          dataset=eval_dataset,

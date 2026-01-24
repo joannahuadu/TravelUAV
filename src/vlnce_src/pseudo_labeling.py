@@ -24,13 +24,58 @@ from src.vlnce_src.closeloop_util import EvalBatchState, BatchIterator, setup, C
 from llamavid.train.train_uav.train_uav_cot import LazySupervisedDataset, preprocess
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from torch.utils.data import DataLoader
 import re
+from groundingdino.util.inference import load_model, load_image, predict
+from torchvision.ops import box_convert
+
+PERSPECTIVES = ["front", "left", "right", "rear", "down", "current"]
+
+def detect_bbox(image_path: str, text_prompt: str, model, box_threshold: float = 0.35, text_threshold: float = 0.25) -> Optional[List[float]]:
+    image_source, image = load_image(image_path)
+    boxes, logits, phrases = predict(
+        model=model,
+        image=image,
+        caption=text_prompt,
+        box_threshold=box_threshold,
+        text_threshold=text_threshold,
+    )
+    if len(boxes) == 0:
+        return None
+    h, w, _ = image_source.shape
+    boxes = boxes * torch.Tensor([w, h, w, h])
+    xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy")
+    boxes = xyxy / torch.Tensor([w, h, w, h])
+    return boxes[0].tolist()
+
+def detect_bbox_over_five_views(images: Dict[str, str], text_prompt: str, model) -> Tuple[Optional[str], Optional[List[float]]]:
+    bboxes = {}
+    for view in PERSPECTIVES:
+        if view not in images:
+            continue
+        p = images[view]
+        bbox = detect_bbox(p, text_prompt, model)
+        if bbox is not None:
+            bboxes[view] = bbox
+    return bboxes
+
+def load_groundingdino_model(device):
+    cfg = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/src/model_wrapper/utils/GroundingDINO/groundingdino/config/GroundingDINO_SwinB_cfg.py"
+    weight = "/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/src/model_wrapper/utils/GroundingDINO/groundingdino_swinb_cogcoor.pth"
+    model = load_model(cfg, weight)
+    model.to(device=device)
+    return model
 
 
-def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500, r1_gen=False):
-
+def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500, r1_os=False): 
+    with open(dataset.data_args.data_path, "r", encoding="utf-8") as jf:
+        json_data = json.load(jf)
+    match = re.search(r"_([0-9]+)\.json$", dataset.data_args.data_path)
+    if match:
+        idx = int(match.group(1))
+        print(f"File: {len(json_data)}, {idx}")
+    
     os.makedirs(eval_save_dir, exist_ok=True)
     save_file = f"{eval_save_dir}/eval_results.jsonl"
 
@@ -44,11 +89,11 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
     dataloader = DataLoader(dataset, batch_size=batch_size)
     model = model_wrapper.model
     tokenizer = model_wrapper.tokenizer
-
+    dino = load_groundingdino_model(model.device)
     model.eval()
     
     current_idx = 0
-    if r1_gen:
+    if r1_os:
         max_new_tokens = 10
     with torch.no_grad(), open(save_file, "a", encoding="utf-8") as f:
         for batch in tqdm.tqdm(dataset, desc="Evaluating"):
@@ -85,41 +130,20 @@ def eval(model_wrapper, dataset, eval_save_dir, batch_size=1, max_new_tokens=500
                     use_cache = False,
                 )
                 outputs[outputs == -200] = 0
-            decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            if not "bbox_2d" in decoded_text and r1_gen:
-                image = batch['image']
-                has_image = (image is not None)
-                sources = [[{"from": "human", "value": "<image>\n" + re.sub(r'^.*?USER:\s*', '', decoded_text[0]) + f"{{\n\"bbox_2d\": " }, {"from": "gpt", "value": ""}]]
-                data_dict = preprocess(
-                    sources,
-                    image,
-                    tokenizer,
-                    has_image=has_image,
-                    eval=True)
-                input_ids = data_dict["input_ids"].to(model.device)
-                if 'attention_mask' in data_dict: 
-                    attention_mask = data_dict["attention_mask"].to(model.device)
-                else:
-                    attention_mask=input_ids.ne(tokenizer.pad_token_id).to(model.device)
+            decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+            # subgoal = re.sub(r"(?i)^\s*Subgoal\s*:\s*", "", decoded_text).strip()
+            match = re.search(r"Subgoal:\s*(.*?)\.", decoded_text)
+            if match:
+                subgoal = match.group(1)
+            images = {"front": batch['image'][0], "left": batch['image'][1], "right": batch['image'][2], "rear": batch['image'][3], "down": batch['image'][4]}
+            bboxes = detect_bbox_over_five_views(images, subgoal, dino)
+            record = json_data[current_idx]
+            record["subgoal"] = subgoal
+            record["bbox"] = bboxes
+            record["pseudo"] = True
 
-                if "pixel_values" in data_dict:
-                    pixel_values = data_dict["pixel_values"].to(model.device)
-                    image_sizes = data_dict["image_sizes"].to(model.device)
-                outputs = model.generate(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        pixel_values=pixel_values,
-                        image_sizes=image_sizes,
-                        max_new_tokens=max_new_tokens+100,
-                        cot_eval = True,
-                        use_cache = False,
-                    )
-                decoded_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-            f.write(str(batch['view'])+ "--")
-            for text in decoded_text:
-                f.write(json.dumps(text, ensure_ascii=False) + "\n")
-                f.flush()
+            f.write(json.dumps(record, ensure_ascii=False) + ",\n")
+            f.flush()
                 
             current_idx += 1
     
@@ -136,9 +160,10 @@ if __name__ == "__main__":
                                 data_path=data_args.data_path,
                                 data_args=data_args, 
                                 r1=data_args.r1, 
-                                r1_gen=data_args.r1_gen)
+                                r1_gen=data_args.r1_gen,
+                                r1_os=data_args.r1_os)
     
     eval(model_wrapper=model_wrapper,
          dataset=eval_dataset,
          eval_save_dir=eval_save_path,
-         r1_gen=data_args.r1_gen)
+         r1_os=data_args.r1_os)

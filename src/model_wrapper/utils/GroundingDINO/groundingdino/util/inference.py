@@ -44,7 +44,10 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ]
     )
-    image_source = Image.open(image_path).convert("RGB")
+    if isinstance(image_path, str):
+        image_source = Image.open(image_path).convert("RGB")
+    else:
+        image_source = image_path
     image = np.asarray(image_source)
     image_transformed, _ = transform(image_source, None)
     return image, image_transformed

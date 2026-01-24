@@ -663,8 +663,10 @@ def preprocess_imgsp_qwen(
     has_image: List[Image.Image],
     img_token: str = '<image>',
     refine_prompt: bool = False,
+    eval: bool = False,
 ) -> Dict:
     processor = AutoProcessor.from_pretrained("/home/fit/qiuhan/WORK/wmq/TravelUAV_ws/TravelUAV/Model/LLaMA-UAV/model_zoo/Qwen2.5-VL-7B-Instruct")
+    # processor.tokenizer = tokenizer 
     system_message = {
         "role": "system",
         "content": [
@@ -672,7 +674,8 @@ def preprocess_imgsp_qwen(
         ]
     }
     messages = _build_messages(sources[0], has_image, system_message)
-
+    if eval:
+        messages = [m for m in messages if m["role"] in ("system", "user")]
     full_result = processor.apply_chat_template(
         messages, tokenize=True, return_dict=True, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length
     )
@@ -680,6 +683,12 @@ def preprocess_imgsp_qwen(
     input_ids = full_result["input_ids"]
     if isinstance(input_ids, list):
         input_ids = torch.tensor(input_ids).unsqueeze(0)
+
+    if eval:
+        full_result["labels"] = None
+        full_result["input_ids"] = input_ids
+        full_result['prompt'] = sources
+        return full_result
 
     labels = torch.full_like(input_ids, IGNORE_INDEX)
 
@@ -916,9 +925,9 @@ class LazySupervisedDataset(Dataset):
         elif row == 2 and col == 1:
             return 'cruise'
         elif row == 0 and col == 0:
-            return 'left and take off'
+            return 'take off'
         elif row == 0 and col == 2:
-            return 'right and take off'
+            return 'take off'
         elif row == 2 and col == 0:
             return 'left'
         elif row == 2 and col == 2:
@@ -1009,11 +1018,11 @@ class LazySupervisedDataset(Dataset):
                 future_delta_str = None
                 cur_pos_str = None
             if self.r2 and self.data_args.visual_assist:
-                if image_idx==0 and 'front' in bbox:
+                if image_idx==0 and 'front' in bbox and frame_num > 5:
                     stage = self.get_visual_stage(bbox)
-                elif image_idx==1 and 'left' in bbox:
+                elif image_idx==1 and 'left' in bbox and frame_num > 5:
                     stage = 'left'
-                elif image_idx==2 and 'right' in bbox:
+                elif image_idx==2 and 'right' in bbox and frame_num > 5:
                     stage = 'right'
                 else:
                     stage, _, _ = self.get_stage(sources[0]['trajectory'], frame_num)
@@ -1120,10 +1129,10 @@ class LazySupervisedDataset(Dataset):
                             else:
                                 assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
                 assist = re.sub(r',\s*$', '.', assist.strip())
+        if self.r2 and self.data_args.visual_assist:
+            assist += f"\nStage: {stage}."
         if dataset_name != "aerialvg" and not self.r1 and not self.r1_gen and not self.r1_os:
             assist += "\nControl:"
-            if self.r2 and self.data_args.visual_assist:
-                assist += f"{stage}"
 
         if conversation_lib.default_conversation.version.startswith("imgsp_qwen") or conversation_lib.default_conversation.version.startswith("imgsp_llava") or conversation_lib.default_conversation.version.startswith("imgsp_uav"):
             if dataset_name == "traveluav":

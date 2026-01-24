@@ -168,15 +168,16 @@ class LlavaLlamaAttForCausalLM(LlamaUAVForCausalLM, LLaMAVIDMetaForCausalLM):
             
         hidden_states = outputs[0]
         waypoints_feat = hidden_states[labels == WAYPOINT_LABEL_TOKEN]     
-        predicted_waypoints = self.forward_waypoint(waypoints_feat)
+        if len(waypoints_feat):   
+            predicted_waypoints = self.forward_waypoint(waypoints_feat)
         
         if waypoints is None and return_waypoints:
             return predicted_waypoints
         
         loss = None
         
-        assert len(torch.where(labels == WAYPOINT_LABEL_TOKEN)[0]) == waypoints.shape[0]
         if waypoints is not None:
+            assert len(torch.where(labels == WAYPOINT_LABEL_TOKEN)[0]) == waypoints.shape[0]
             if self.use_angle_and_norm_loss:
                 waypoint_loss = self.waypoint_loss_scale * self.waypoints_loss_func(predicted_waypoints[:, 3], waypoints[:, 3])
                 angle_loss = self.waypoint_loss_scale * self.angle_loss_func(predicted_waypoints[:, :3], waypoints[:, :3])
