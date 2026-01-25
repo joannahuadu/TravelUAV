@@ -51,3 +51,6 @@ jobs/*
 fig/*
 *.json
 *.jsonl
+tmp*/
+tmp*/_remote_module_non_scriptable.py
+**/tmp*/_remote_module_non_scriptable.py

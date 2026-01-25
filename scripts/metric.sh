@@ -4,7 +4,7 @@
 # ANALYSIS_LIST="eval dir list" # ANALYSIS_LIST="baseline baseline2"
 # PATH_TYPE_LIST="full easy hard" # full easy hard
 
-ROOT_DIR="/mnt/data1/workspace/wmq/TravelUAV_ws/TravelUAV_data/TravelUAV/eval_closeloop_llava_llama_attn_bs128_all_fast"
+ROOT_DIR="/mnt/data1/workspace/wmq/TravelUAV_ws/eval_data/eval_seen_closeloop_llavanext_our_r2L1A"
 ANALYSIS_LIST="."
 PATH_TYPE_LIST="full"
 
