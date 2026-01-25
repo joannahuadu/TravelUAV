@@ -84,6 +84,7 @@ class DataArguments:
     r1: bool = field(default=False)
     r1_gen: bool = field(default=False)
     r1_os: bool = field(default=False)
+    visual_assist: bool = field(default=False)
     
 @dataclass
 class ModelArguments:
