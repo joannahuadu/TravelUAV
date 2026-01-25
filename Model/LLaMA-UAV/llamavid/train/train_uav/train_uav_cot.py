@@ -200,6 +200,7 @@ class DataArguments:
     r1: bool = field(default=False)
     r1_gen: bool = field(default=False)
     r2: bool = field(default=False)
+    r2_all: bool = field(default=False)
     r1_os: bool = field(default=False)
 
 @dataclass
@@ -845,6 +846,7 @@ class LazySupervisedDataset(Dataset):
                  r1: bool = False, 
                  r1_gen: bool = False, 
                  r2: bool = False,
+                 r2_all: bool = False,
                  r1_os: bool = False):
         super(LazySupervisedDataset, self).__init__()
         if isinstance(data_path, str):
@@ -864,8 +866,9 @@ class LazySupervisedDataset(Dataset):
         self.r1 = r1
         self.r1_gen = r1_gen
         self.r2 = r2
+        self.r2_all = r2_all
         self.r1_os = r1_os
-        if self.r2:
+        if self.r2 or self.r2_all:
             real_data = []
             pseudo_data = []
             for item in tqdm.tqdm(self.list_data_dict):
@@ -977,6 +980,7 @@ class LazySupervisedDataset(Dataset):
         frame_num = infos['frame']
         bbox = infos['bbox']
         subgoal = infos['subgoal']
+        subgoal = re.sub(r'\b2-\S+\s*', '', subgoal).strip()
         pseudo = infos.get('pseudo', False)
         states = self.dataset_state[dataset_name]
 
@@ -1017,7 +1021,7 @@ class LazySupervisedDataset(Dataset):
             else:
                 future_delta_str = None
                 cur_pos_str = None
-            if self.r2 and self.data_args.visual_assist:
+            if (self.r2 or self.r2_all) and self.data_args.visual_assist:
                 if image_idx==0 and 'front' in bbox and frame_num > 5:
                     stage = self.get_visual_stage(bbox)
                 elif image_idx==1 and 'left' in bbox and frame_num > 5:
@@ -1129,7 +1133,7 @@ class LazySupervisedDataset(Dataset):
                             else:
                                 assist += f"{{\n\"bbox_2d\": {bbox_formatted}\n}}, "
                 assist = re.sub(r',\s*$', '.', assist.strip())
-        if self.r2 and self.data_args.visual_assist:
+        if (self.r2 or self.r2_all) and self.data_args.visual_assist:
             assist += f"\nStage: {stage}."
         if dataset_name != "aerialvg" and not self.r1 and not self.r1_gen and not self.r1_os:
             assist += "\nControl:"
@@ -1322,7 +1326,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
                                 data_path=data_args.data_path,
-                                data_args=data_args, r1=data_args.r1, r1_gen=data_args.r1_gen, r2=data_args.r2, r1_os=data_args.r1_os)
+                                data_args=data_args, r1=data_args.r1, r1_gen=data_args.r1_gen, r2=data_args.r2, r2_all=data_args.r2_all, r1_os=data_args.r1_os)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
@@ -1529,8 +1533,9 @@ def train():
             p.requires_grad = True
         for p in model.history_preprocessor.parameters():
             p.requires_grad = True
-        for p in model.bbox_head.parameters():
-            p.requires_grad = True
+        if hasattr(model, "bbox_head") and model.bbox_head is not None:
+            for p in model.bbox_head.parameters():
+                p.requires_grad = True
 
     for name, param in model.named_parameters():
         if 'lora' in name:
